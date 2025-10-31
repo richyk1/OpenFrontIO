@@ -10,6 +10,16 @@ export type TerrainMapData = {
 
 const loadedMaps = new Map<GameMapType, TerrainMapData>();
 
+/**
+ * Clear the terrain map cache.
+ *
+ * CRITICAL: Must be called on reset when reusing Node.js process.
+ * Cached terrain maps retain game state (territory ownership) from previous episodes.
+ */
+export function clearTerrainMapCache(): void {
+  loadedMaps.clear();
+}
+
 export interface MapMetadata {
   width: number;
   height: number;
