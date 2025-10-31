@@ -173,6 +173,7 @@ export default async (env, argv) => {
     devServer: isProduction
       ? {}
       : {
+          host: "0.0.0.0",
           devMiddleware: { writeToDisk: true },
           static: {
             directory: path.join(__dirname, "static"),
