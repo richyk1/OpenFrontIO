@@ -10,3 +10,7 @@ resources/.DS_Store
 .DS_Store
 .clinic/
 CLAUDE.md
+**/*.js
+**/*.d.ts
+**/*.js.map
+**/*.d.ts.map
