@@ -1245,4 +1245,40 @@ export class PlayerImpl implements Player {
   bestTransportShipSpawn(targetTile: TileRef): TileRef | false {
     return bestShoreDeploymentSource(this.mg, this, targetTile);
   }
+
+  /**
+   * Cleanup expired historical data to prevent memory leaks.
+   * Should be called periodically (e.g., every 100 ticks).
+   */
+  cleanupExpiredData(): void {
+    const currentTick = this.mg.ticks();
+    const cooldownMultiplier = 2; // Keep data for 2x the cooldown to be safe
+
+    // Cleanup old alliance requests
+    const allianceCooldown =
+      this.mg.config().allianceRequestCooldown() * cooldownMultiplier;
+    this.pastOutgoingAllianceRequests =
+      this.pastOutgoingAllianceRequests.filter(
+        (ar) => currentTick - ar.createdAt() < allianceCooldown,
+      );
+
+    // Cleanup old donations
+    const donateCooldown =
+      this.mg.config().donateCooldown() * cooldownMultiplier;
+    this.sentDonations = this.sentDonations.filter(
+      (d) => currentTick - d.tick < donateCooldown,
+    );
+
+    // Cleanup old emojis (keep for 60 seconds worth of ticks = 60 * 10 = 600 ticks)
+    const emojiExpiry = 600;
+    this.outgoingEmojis_ = this.outgoingEmojis_.filter(
+      (e) => currentTick - e.createdAt < emojiExpiry,
+    );
+
+    // Cleanup old targets (keep for 5 minutes = 3000 ticks)
+    const targetExpiry = 3000;
+    this.targets_ = this.targets_.filter(
+      (t) => currentTick - t.tick < targetExpiry,
+    );
+  }
 }

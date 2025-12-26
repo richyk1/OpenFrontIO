@@ -124,6 +124,8 @@ export class GameRunner {
     this.game.addExecution(
       ...this.execManager.createExecs(this.turns[this.currTurn]),
     );
+    // Clear processed turn to prevent memory leak
+    this.turns[this.currTurn] = null as unknown as Turn;
     this.currTurn++;
 
     let updates: GameUpdates;
