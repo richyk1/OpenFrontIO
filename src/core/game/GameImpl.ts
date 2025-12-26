@@ -363,6 +363,14 @@ export class GameImpl implements Game {
         hash: this.hash(),
       });
     }
+    // Periodic cleanup of expired player data to prevent memory leaks
+    if (this.ticks() % 100 === 0) {
+      for (const player of this._players.values()) {
+        if (player instanceof PlayerImpl) {
+          player.cleanupExpiredData();
+        }
+      }
+    }
     this._ticks++;
     return this.updates;
   }
