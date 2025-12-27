@@ -108,7 +108,8 @@ export class TransportShipExecution implements Execution {
       this.dst,
     );
     if (closestTileSrc === false) {
-      console.warn(`can't build transport ship`);
+      // Silently fail - RL agent will learn from failed actions
+      // Debug logging available via: console.debug(`can't build transport ship`);
       this.active = false;
       return;
     }
@@ -224,7 +225,7 @@ export class TransportShipExecution implements Execution {
         break;
       case PathFindResultType.PathNotFound:
         // TODO: add to poisoned port list
-        console.warn(`path not found to dst`);
+        // Silently fail - troops are refunded, agent learns from failed actions
         this.attacker.addTroops(this.boat.troops());
         this.boat.delete(false);
         this.active = false;
