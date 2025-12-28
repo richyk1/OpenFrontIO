@@ -179,6 +179,7 @@ export class GameRunner {
       tickExecutionDuration: tickExecutionDuration,
     });
     this.isExecuting = false;
+    return updates;
   }
 
   public playerActions(

@@ -56,7 +56,6 @@ export class WinCheckExecution implements Execution {
         timeElapsed - this.mg.config().gameConfig().maxTimerValue! * 60 >= 0)
     ) {
       this.mg.setWinner(max, this.mg.stats().stats());
-      console.log(`${max.name()} has won the game`);
       this.active = false;
     }
   }
@@ -92,7 +91,6 @@ export class WinCheckExecution implements Execution {
     ) {
       if (max[0] === ColoredTeams.Bot) return;
       this.mg.setWinner(max[0], this.mg.stats().stats());
-      console.log(`${max[0]} has won the game`);
       this.active = false;
     }
   }
