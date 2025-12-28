@@ -177,6 +177,7 @@ export class GameRunner {
       playerNameViewData: this.playerViewData,
     });
     this.isExecuting = false;
+    return updates;
   }
 
   public playerActions(

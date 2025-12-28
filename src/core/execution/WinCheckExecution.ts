@@ -46,12 +46,9 @@ export class WinCheckExecution implements Execution {
     const max = sorted[0];
     const numTilesWithoutFallout =
       this.mg.numLandTiles() - this.mg.numTilesWithFallout();
-    if (
-      (max.numTilesOwned() / numTilesWithoutFallout) * 100 >
-      this.mg.config().percentageTilesOwnedToWin()
-    ) {
+    const percentage = (max.numTilesOwned() / numTilesWithoutFallout) * 100;
+    if (percentage > this.mg.config().percentageTilesOwnedToWin()) {
       this.mg.setWinner(max, this.mg.stats().stats());
-      console.log(`${max.name()} has won the game`);
       this.active = false;
     }
   }
@@ -81,7 +78,6 @@ export class WinCheckExecution implements Execution {
     if (percentage > this.mg.config().percentageTilesOwnedToWin()) {
       if (max[0] === ColoredTeams.Bot) return;
       this.mg.setWinner(max[0], this.mg.stats().stats());
-      console.log(`${max[0]} has won the game`);
       this.active = false;
     }
   }
