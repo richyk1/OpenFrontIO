@@ -265,4 +265,24 @@ export class GameRunner {
     }
     return player.bestTransportShipSpawn(targetTile);
   }
+
+  /**
+   * Dispose of the game runner and release memory.
+   * Called during RL training resets to prevent memory accumulation.
+   */
+  public dispose(): void {
+    // Clear turns array
+    this.turns.length = 0;
+    this.currTurn = 0;
+
+    // Clear player view data
+    for (const key in this.playerViewData) {
+      delete this.playerViewData[key];
+    }
+
+    // Clear game executions
+    if (this.game) {
+      this.game.removeInactiveExecutions();
+    }
+  }
 }

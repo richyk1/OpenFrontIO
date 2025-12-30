@@ -109,13 +109,10 @@ export class MirvExecution implements Execution {
       }
       dsts.push(potential);
     }
-    console.log(`dsts: ${dsts.length}`);
     dsts.sort(
       (a, b) =>
         this.mg.manhattanDist(b, this.dst) - this.mg.manhattanDist(a, this.dst),
     );
-    console.log(`got ${dsts.length} dsts!!`);
-
     for (const [i, dst] of dsts.entries()) {
       this.mg.addExecution(
         new NukeExecution(
@@ -163,7 +160,6 @@ export class MirvExecution implements Execution {
       }
       return tile;
     }
-    console.log("couldn't find place, giving up");
     return null;
   }
 
