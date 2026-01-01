@@ -61,7 +61,8 @@ export function distSortUnit(
   };
 }
 
-export function simpleHash(str: string): number {
+export function simpleHash(str: string | null | undefined): number {
+  if (str == null) return 0; // Handle null/undefined (FakeHuman players have null clientID)
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
