@@ -128,8 +128,7 @@ export class NationExecution implements Execution {
       const rl = this.randomSpawnLand();
 
       if (rl === null) {
-        // Suppressed: no available land for nation spawn is normal on crowded/small maps
-        // console.warn(`cannot spawn ${this.nation.playerInfo.name}`);
+        console.warn(`cannot spawn ${this.nation.playerInfo.name}`);
         return;
       }
 

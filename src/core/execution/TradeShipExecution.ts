@@ -38,8 +38,7 @@ export class TradeShipExecution implements Execution {
         this.srcPort.tile(),
       );
       if (spawn === false) {
-        // Suppressed: normal gameplay - port destroyed, insufficient gold, etc.
-        // console.warn(`cannot build trade ship`);
+        console.warn(`cannot build trade ship`);
         this.active = false;
         return;
       }
@@ -122,8 +121,7 @@ export class TradeShipExecution implements Execution {
         this.complete();
         break;
       case PathFindResultType.PathNotFound:
-        // Suppressed: normal gameplay condition when captured ships have no valid route
-        // console.warn("captured trade ship cannot find route");
+        console.warn("captured trade ship cannot find route");
         if (this.tradeShip.isActive()) {
           this.tradeShip.delete(false);
         }

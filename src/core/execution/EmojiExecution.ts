@@ -36,8 +36,9 @@ export class EmojiExecution implements Execution {
   tick(ticks: number): void {
     const emojiString = flattenedEmojiTable[this.emoji];
     if (emojiString === undefined) {
-      // Suppressed: invalid emoji index is handled gracefully, no action needed
-      // console.warn(`cannot send emoji ${this.emoji} from ${this.requestor} to ${this.recipient}`);
+      console.warn(
+        `cannot send emoji ${this.emoji} from ${this.requestor} to ${this.recipient}`,
+      );
     } else if (this.requestor.canSendEmoji(this.recipient)) {
       this.requestor.sendEmoji(this.recipient, emojiString);
       respondToEmoji(
@@ -48,8 +49,9 @@ export class EmojiExecution implements Execution {
         emojiString,
       );
     } else {
-      // Suppressed: rate limiting or relationship state prevents emoji, handled gracefully
-      // console.warn(`cannot send emoji from ${this.requestor} to ${this.recipient}`);
+      console.warn(
+        `cannot send emoji from ${this.requestor} to ${this.recipient}`,
+      );
     }
     this.active = false;
   }

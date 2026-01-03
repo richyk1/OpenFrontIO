@@ -28,8 +28,7 @@ export class AllianceRequestExecution implements Execution {
     const recipient = mg.player(this.recipientID);
 
     if (!this.requestor.canSendAllianceRequest(recipient)) {
-      // Suppressed: normal gameplay - cooldown, already allied, or other restriction
-      // console.warn("cannot send alliance request");
+      console.warn("cannot send alliance request");
       this.active = false;
     } else {
       const incoming = recipient

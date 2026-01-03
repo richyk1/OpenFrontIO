@@ -58,8 +58,7 @@ export class TrainExecution implements Execution {
 
     const spawn = this.player.canBuild(UnitType.Train, this.stations[0].tile());
     if (spawn === false) {
-      // Suppressed: normal gameplay - insufficient gold, wrong tile, etc.
-      // console.warn(`cannot build train`);
+      console.warn(`cannot build train`);
       this.active = false;
       return;
     }
