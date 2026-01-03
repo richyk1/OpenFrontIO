@@ -121,7 +121,8 @@ export class TradeShipExecution implements Execution {
         this.complete();
         break;
       case PathFindResultType.PathNotFound:
-        console.warn("captured trade ship cannot find route");
+        // Suppressed: normal gameplay condition when captured ships have no valid route
+        // console.warn("captured trade ship cannot find route");
         if (this.tradeShip.isActive()) {
           this.tradeShip.delete(false);
         }

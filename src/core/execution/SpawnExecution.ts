@@ -45,7 +45,8 @@ export class SpawnExecution implements Execution {
     this.tile ??= this.randomSpawnLand();
 
     if (this.tile === undefined) {
-      console.warn(`SpawnExecution: cannot spawn ${this.playerInfo.name}`);
+      // Suppressed: no available land for spawn is normal on crowded/small maps
+      // console.warn(`SpawnExecution: cannot spawn ${this.playerInfo.name}`);
       return;
     }
 
