@@ -128,7 +128,8 @@ export class NukeExecution implements Execution {
     if (this.nuke === null) {
       const spawn = this.player.canBuild(this.nukeType, this.dst);
       if (spawn === false) {
-        console.warn(`cannot build Nuke`);
+        // Suppressed: normal gameplay - no silo, no gold, cooldown, etc.
+        // console.warn(`cannot build Nuke`);
         this.active = false;
         return;
       }
@@ -185,7 +186,8 @@ export class NukeExecution implements Execution {
 
     // make the nuke unactive if it was intercepted
     if (!this.nuke.isActive()) {
-      console.log(`Nuke destroyed before reaching target`);
+      // Suppressed: normal gameplay - SAM intercepted the nuke
+      // console.log(`Nuke destroyed before reaching target`);
       this.active = false;
       return;
     }

@@ -196,7 +196,8 @@ export class SAMLauncherExecution implements Execution {
       }
       const spawnTile = this.player.canBuild(UnitType.SAMLauncher, this.tile);
       if (spawnTile === false) {
-        console.warn("cannot build SAM Launcher");
+        // Suppressed: normal gameplay - insufficient gold, wrong tile, etc.
+        // console.warn("cannot build SAM Launcher");
         this.active = false;
         return;
       }
@@ -254,9 +255,10 @@ export class SAMLauncherExecution implements Execution {
     let target: Target | null = null;
     if (mirvWarheadTargets.length === 0) {
       target = this.targetingSystem.getSingleTarget(ticks);
-      if (target !== null) {
-        console.log("Target acquired");
-      }
+      // Suppressed: informational log about SAM targeting
+      // if (target !== null) {
+      //   console.log("Target acquired");
+      // }
     }
 
     const isSingleTarget = target && !target.unit.targetedBySAM();

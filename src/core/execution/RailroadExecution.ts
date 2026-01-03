@@ -107,7 +107,8 @@ export class RailroadExecution implements Execution {
       if (dx1 === 1 && dx2 === 0 && dy2 === 1) return RailType.BOTTOM_LEFT;
       if (dx1 === -1 && dx2 === 0 && dy2 === 1) return RailType.BOTTOM_RIGHT;
     }
-    console.warn(`Invalid rail segment: ${dx1}:${dy1}, ${dx2}:${dy2}`);
+    // Suppressed: edge case in rail pathfinding, falls back to VERTICAL gracefully
+    // console.warn(`Invalid rail segment: ${dx1}:${dy1}, ${dx2}:${dy2}`);
     return RailType.VERTICAL;
   }
 

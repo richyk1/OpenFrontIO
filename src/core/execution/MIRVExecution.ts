@@ -61,7 +61,8 @@ export class MirvExecution implements Execution {
     if (this.nuke === null) {
       const spawn = this.player.canBuild(UnitType.MIRV, this.dst);
       if (spawn === false) {
-        console.warn(`cannot build MIRV`);
+        // Suppressed: normal gameplay - no silo, no gold, cooldown, etc.
+        // console.warn(`cannot build MIRV`);
         this.active = false;
         return;
       }

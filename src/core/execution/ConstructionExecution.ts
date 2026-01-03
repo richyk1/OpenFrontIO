@@ -28,15 +28,15 @@ export class ConstructionExecution implements Execution {
     this.mg = mg;
 
     if (this.mg.config().isUnitDisabled(this.constructionType)) {
-      console.warn(
-        `cannot build construction ${this.constructionType} because it is disabled`,
-      );
+      // Suppressed: unit type disabled by config is normal
+      // console.warn(`cannot build construction ${this.constructionType} because it is disabled`);
       this.active = false;
       return;
     }
 
     if (!this.mg.isValidRef(this.tile)) {
-      console.warn(`cannot build construction invalid tile ${this.tile}`);
+      // Suppressed: invalid tile reference handled gracefully
+      // console.warn(`cannot build construction invalid tile ${this.tile}`);
       this.active = false;
       return;
     }
@@ -57,7 +57,8 @@ export class ConstructionExecution implements Execution {
       // Structures: build real unit and mark under construction
       const spawnTile = this.player.canBuild(this.constructionType, this.tile);
       if (spawnTile === false) {
-        console.warn(`cannot build ${this.constructionType}`);
+        // Suppressed: normal gameplay - insufficient gold, wrong tile, etc.
+        // console.warn(`cannot build ${this.constructionType}`);
         this.active = false;
         return;
       }
