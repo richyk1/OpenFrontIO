@@ -596,6 +596,169 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/NationExecution",
+    className: "NationExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      const originalTick = proto.tick;
+      const originalInit = proto.init;
+
+      // Patch init to create Rust instance with difficulty
+      proto.init = function (this: any, mg: any) {
+        originalInit.call(this, mg);
+
+        // Create Rust NationExecution instance
+        if (!this._rustExec) {
+          this._rustExec = new rustCore.NationExecution(
+            this.nation.playerInfo.id,
+            this.gameID,
+          );
+          // Initialize with difficulty
+          const difficulty = mg.config().gameConfig().difficulty;
+          this._rustExec.initWithDifficulty(difficulty);
+        }
+      };
+
+      proto.tick = function (this: any, ticks: number) {
+        const mg = this.mg;
+        if (!mg || !this._rustExec) {
+          originalTick.call(this, ticks);
+          return;
+        }
+
+        // Use Rust to check if we should act this tick (for warship tracking, always check)
+        // Warship tracking happens every tick on non-Easy difficulty
+        if (
+          this.warshipBehavior !== null &&
+          this.player !== null &&
+          this.player.isAlive() &&
+          mg.config().gameConfig().difficulty !== 0 // Difficulty.Easy
+        ) {
+          this.warshipBehavior.trackShipsAndRetaliate();
+        }
+
+        // Check if nation should act this tick using Rust
+        if (!this._rustExec.shouldActThisTick(ticks)) {
+          return;
+        }
+
+        if (this.player === null) {
+          return;
+        }
+
+        // Handle spawn phase
+        if (mg.inSpawnPhase()) {
+          if (this.nation.spawnCell === undefined) {
+            // Use SpawnExecution for random placement
+            if (this._SpawnExecution) {
+              mg.addExecution(
+                new this._SpawnExecution(this.gameID, this.nation.playerInfo),
+              );
+            }
+            return;
+          }
+
+          // Select a tile near the position defined in the map manifest
+          const rl = this.randomSpawnLand();
+          if (rl === null) {
+            console.warn(`cannot spawn ${this.nation.playerInfo.name}`);
+            return;
+          }
+
+          if (this._SpawnExecution) {
+            mg.addExecution(
+              new this._SpawnExecution(this.gameID, this.nation.playerInfo, rl),
+            );
+          }
+          return;
+        }
+
+        if (!this.player.isAlive()) {
+          this.active = false;
+          this._rustExec.setActive(false);
+          return;
+        }
+
+        // Initialize behaviors if needed (using Rust check)
+        if (this._rustExec.needsBehaviorInit()) {
+          if (this._NationEmojiBehavior) {
+            this.emojiBehavior = new this._NationEmojiBehavior(
+              this.random,
+              mg,
+              this.player,
+            );
+          }
+          if (this._NationMIRVBehavior) {
+            this.mirvBehavior = new this._NationMIRVBehavior(
+              this.random,
+              mg,
+              this.player,
+              this.emojiBehavior,
+            );
+          }
+          if (this._NationAllianceBehavior) {
+            this.allianceBehavior = new this._NationAllianceBehavior(
+              this.random,
+              mg,
+              this.player,
+              this.emojiBehavior,
+            );
+          }
+          if (this._NationWarshipBehavior) {
+            this.warshipBehavior = new this._NationWarshipBehavior(
+              this.random,
+              mg,
+              this.player,
+              this.emojiBehavior,
+            );
+          }
+          if (this._AiAttackBehavior) {
+            this.attackBehavior = new this._AiAttackBehavior(
+              this.random,
+              mg,
+              this.player,
+              this._rustExec.triggerRatio,
+              this._rustExec.reserveRatio,
+              this._rustExec.expandRatio,
+              this.allianceBehavior,
+              this.emojiBehavior,
+            );
+          }
+
+          this._rustExec.markBehaviorsInitialized();
+
+          // Send an attack on the first tick
+          if (this.attackBehavior) {
+            this.attackBehavior.forceSendAttack(mg.terraNullius());
+          }
+          return;
+        }
+
+        // Run the rest of tick logic (behaviors already initialized)
+        if (this.emojiBehavior) {
+          this.emojiBehavior.maybeSendCasualEmoji();
+        }
+        this.updateRelationsFromEmbargos();
+        if (this.allianceBehavior) {
+          this.allianceBehavior.handleAllianceRequests();
+          this.allianceBehavior.handleAllianceExtensionRequests();
+        }
+        this.handleUnits();
+        this.handleEmbargoesToHostileNations();
+        if (this.mirvBehavior) {
+          this.mirvBehavior.considerMIRV();
+        }
+        this.maybeAttack();
+        if (this.warshipBehavior) {
+          this.warshipBehavior.counterWarshipInfestation();
+        }
+      };
+
+      proto._originalTick = originalTick;
+      proto._originalInit = originalInit;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -689,6 +852,45 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load BotExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for NationExecution
+          if (patch.className === "NationExecution") {
+            try {
+              const spawnExecMod = await import(
+                "../src/core/execution/SpawnExecution"
+              );
+              const emojiBehaviorMod = await import(
+                "../src/core/execution/nation/NationEmojiBehavior"
+              );
+              const mirvBehaviorMod = await import(
+                "../src/core/execution/nation/NationMIRVBehavior"
+              );
+              const allianceBehaviorMod = await import(
+                "../src/core/execution/nation/NationAllianceBehavior"
+              );
+              const warshipBehaviorMod = await import(
+                "../src/core/execution/nation/NationWarshipBehavior"
+              );
+              const aiAttackMod = await import(
+                "../src/core/execution/utils/AiAttackBehavior"
+              );
+
+              // Store on prototype for access in patched method
+              proto._SpawnExecution = spawnExecMod.SpawnExecution;
+              proto._NationEmojiBehavior = emojiBehaviorMod.NationEmojiBehavior;
+              proto._NationMIRVBehavior = mirvBehaviorMod.NationMIRVBehavior;
+              proto._NationAllianceBehavior =
+                allianceBehaviorMod.NationAllianceBehavior;
+              proto._NationWarshipBehavior =
+                warshipBehaviorMod.NationWarshipBehavior;
+              proto._AiAttackBehavior = aiAttackMod.AiAttackBehavior;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load NationExecution dependencies:",
                 depErr,
               );
             }
