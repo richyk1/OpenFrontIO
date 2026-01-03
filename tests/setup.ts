@@ -759,6 +759,184 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalInit = originalInit;
     },
   },
+  {
+    modulePath: "../src/core/execution/TransportShipExecution",
+    className: "TransportShipExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      const originalTick = proto.tick;
+      const originalInit = proto.init;
+
+      // Patch init to create Rust instance
+      proto.init = function (this: any, mg: any, ticks: number) {
+        originalInit.call(this, mg, ticks);
+
+        // Create Rust TransportShipExecution instance after JS init
+        if (this.active && !this._rustExec) {
+          this._rustExec = new rustCore.TransportShipExecution(
+            this.startTroops ?? 0,
+          );
+          this._rustExec.initTick(ticks);
+        }
+      };
+
+      proto.tick = function (this: any, ticks: number) {
+        // Fallback to original if no Rust instance
+        if (!this._rustExec || this.dst === null) {
+          originalTick.call(this, ticks);
+          return;
+        }
+
+        if (!this.active) {
+          return;
+        }
+
+        if (!this.boat.isActive()) {
+          this.active = false;
+          this._rustExec.setActive(false);
+          return;
+        }
+
+        // Use Rust to check timing
+        if (!this._rustExec.shouldMove(ticks)) {
+          return;
+        }
+        this._rustExec.updateLastMove(ticks);
+
+        // Update lastMove for JS compatibility
+        this.lastMove = ticks;
+
+        // Team mate ownership transfer (keep in JS - complex game logic)
+        const boatOwner = this.boat.owner();
+        if (
+          this.originalOwner.isDisconnected() &&
+          boatOwner !== this.originalOwner &&
+          boatOwner.isOnSameTeam(this.originalOwner)
+        ) {
+          this.attacker = boatOwner;
+          this.originalOwner = boatOwner;
+        }
+
+        // Handle retreat (keep pathfinding in JS)
+        if (this.boat.retreating()) {
+          if (this.mg.owner(this.src) !== this.attacker) {
+            const newSrc = this.attacker.bestTransportShipSpawn(this.dst);
+            if (newSrc === false) {
+              this.src = null;
+            } else {
+              this.src = newSrc;
+            }
+          }
+
+          if (this.src === null) {
+            console.warn(
+              "TransportShipExecution: retreating but no src found for new attacker",
+            );
+            this.attacker.addTroops(this.boat.troops());
+            this.boat.delete(false);
+            this.active = false;
+            this._rustExec.setActive(false);
+            return;
+          } else {
+            this.dst = this.src;
+            if (this.boat.targetTile() !== this.dst) {
+              this.boat.setTargetTile(this.dst);
+            }
+          }
+        }
+
+        // Pathfinding stays in JS
+        const result = this.pathFinder.nextTile(this.boat.tile(), this.dst);
+        const PathFindResultType = this._PathFindResultType;
+
+        switch (result.type) {
+          case PathFindResultType.Completed: {
+            const dstOwnedByAttacker =
+              this.mg.owner(this.dst) === this.attacker;
+
+            if (dstOwnedByAttacker) {
+              // Use Rust for retreat survivor calculation
+              const survivors = this._rustExec.calculateRetreatSurvivors(
+                this.boat.troops(),
+              );
+              const survivorCount = survivors[0];
+              const deaths = survivors[1];
+
+              this.attacker.addTroops(survivorCount);
+              this.boat.delete(false);
+              this.active = false;
+              this._rustExec.setActive(false);
+
+              // Record stats
+              this.mg
+                .stats()
+                .boatArriveTroops(this.attacker, this.target, survivorCount);
+
+              if (deaths > 0) {
+                const renderTroops = this._renderTroops;
+                if (renderTroops) {
+                  this.mg.displayMessage(
+                    `Attack cancelled, ${renderTroops(deaths)} soldiers killed during retreat.`,
+                    this._MessageType.ATTACK_CANCELLED,
+                    this.attacker.id(),
+                  );
+                }
+              }
+              return;
+            }
+
+            // Conquer destination
+            this.attacker.conquer(this.dst);
+
+            if (
+              this.target.isPlayer() &&
+              this.attacker.isFriendly(this.target)
+            ) {
+              // Friendly - just add troops
+              this.attacker.addTroops(this.boat.troops());
+            } else {
+              // Enemy - start attack
+              if (this._AttackExecution) {
+                this.mg.addExecution(
+                  new this._AttackExecution(
+                    this.boat.troops(),
+                    this.attacker,
+                    this.targetID,
+                    this.dst,
+                    false,
+                  ),
+                );
+              }
+            }
+
+            this.boat.delete(false);
+            this.active = false;
+            this._rustExec.setActive(false);
+
+            // Record stats
+            this.mg
+              .stats()
+              .boatArriveTroops(this.attacker, this.target, this.boat.troops());
+            return;
+          }
+          case PathFindResultType.NextTile:
+            this.boat.move(result.node);
+            break;
+          case PathFindResultType.Pending:
+            break;
+          case PathFindResultType.PathNotFound:
+            this.attacker.addTroops(this.boat.troops());
+            this.boat.delete(false);
+            this.active = false;
+            this._rustExec.setActive(false);
+            return;
+        }
+      };
+
+      proto._originalTick = originalTick;
+      proto._originalInit = originalInit;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -891,6 +1069,29 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load NationExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for TransportShipExecution
+          if (patch.className === "TransportShipExecution") {
+            try {
+              const attackExecMod = await import(
+                "../src/core/execution/AttackExecution"
+              );
+              const astarMod = await import("../src/core/pathfinding/AStar");
+              const gameMod = await import("../src/core/game/Game");
+              const utilsMod = await import("../src/client/Utils");
+
+              // Store on prototype for access in patched method
+              proto._AttackExecution = attackExecMod.AttackExecution;
+              proto._PathFindResultType = astarMod.PathFindResultType;
+              proto._MessageType = gameMod.MessageType;
+              proto._renderTroops = utilsMod.renderTroops;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load TransportShipExecution dependencies:",
                 depErr,
               );
             }
