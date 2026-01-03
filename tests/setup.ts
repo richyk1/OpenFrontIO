@@ -81,6 +81,31 @@ interface SurroundedClusterInfo {
 }
 
 /**
+ * BotGameState - matches Rust struct for bot tick
+ */
+interface BotGameState {
+  ticks: number;
+  bot_alive: boolean;
+  bot_troops: number;
+  max_troops: number;
+  shares_border_with_terra_nullius: boolean;
+  traitor_neighbor_ids: string[];
+  enemy_neighbor_ids: string[];
+}
+
+/**
+ * BotTickResult - result from Rust bot tick
+ */
+interface BotTickResult {
+  skip: boolean;
+  deactivate: boolean;
+  first_tick: boolean;
+  attack_target: string | null;
+  attack_terra_nullius: boolean;
+  attack_random: boolean;
+}
+
+/**
  * Load the Rust WASM module from openfront-core
  */
 function loadRustCore(): RustCore {
@@ -287,6 +312,123 @@ const ASYNC_PATCHES: AsyncPatch[] = [
     },
   },
   {
+    modulePath: "../src/core/execution/BotExecution",
+    className: "BotExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const mg = this.mg;
+        const bot = this.bot;
+        if (!mg || !bot) {
+          originalTick.call(this, ticks);
+          return;
+        }
+
+        // Get or create Rust BotExecution instance
+        this._rustExec ??= new rustCore.BotExecution(bot.id());
+
+        // Build game state for Rust
+        const traitorNeighborIds: string[] = [];
+        const enemyNeighborIds: string[] = [];
+
+        for (const neighbor of bot.neighbors()) {
+          if (!neighbor.isPlayer()) continue;
+          if (bot.isFriendly(neighbor)) continue;
+          enemyNeighborIds.push(neighbor.id());
+          if (neighbor.isTraitor()) {
+            traitorNeighborIds.push(neighbor.id());
+          }
+        }
+
+        const gameState: BotGameState = {
+          ticks,
+          bot_alive: bot.isAlive(),
+          bot_troops: bot.troops(),
+          max_troops: mg.config().maxTroops(bot),
+          shares_border_with_terra_nullius: bot.sharesBorderWith(
+            mg.terraNullius(),
+          ),
+          traitor_neighbor_ids: traitorNeighborIds,
+          enemy_neighbor_ids: enemyNeighborIds,
+        };
+
+        // Call Rust tick
+        const resultJson = this._rustExec.tickJson(JSON.stringify(gameState));
+        const result: BotTickResult = JSON.parse(resultJson);
+
+        if (result.skip) {
+          return;
+        }
+
+        if (result.deactivate) {
+          this.active = false;
+          return;
+        }
+
+        // Handle first tick - initialize attack behavior
+        if (result.first_tick) {
+          // Initialize attack behavior (uses JS AiAttackBehavior)
+          if (!this.attackBehavior) {
+            // Import AiAttackBehavior dynamically stored on proto
+            if (this._AiAttackBehavior) {
+              this.attackBehavior = new this._AiAttackBehavior(
+                this.random,
+                mg,
+                bot,
+                this._rustExec.triggerRatio,
+                this._rustExec.reserveRatio,
+                this._rustExec.expandRatio,
+              );
+            }
+          }
+          if (this.attackBehavior) {
+            this.attackBehavior.sendAttack(mg.terraNullius());
+          }
+          return;
+        }
+
+        // Accept alliance requests (keep in JS as it's simple)
+        for (const req of bot.incomingAllianceRequests()) {
+          req.accept();
+        }
+        for (const alliance of bot.alliances()) {
+          if (!alliance.onlyOneAgreedToExtend()) continue;
+          const human = alliance.other(bot);
+          if (this._AllianceExtensionExecution) {
+            mg.addExecution(
+              new this._AllianceExtensionExecution(bot, human.id()),
+            );
+          }
+        }
+
+        // Handle attack actions
+        if (result.attack_target) {
+          const target = mg.player(result.attack_target);
+          if (target && this.attackBehavior) {
+            // Check and break alliance before attacking if needed
+            const alliance = bot.allianceWith(target);
+            if (alliance !== null) {
+              bot.breakAlliance(alliance);
+            }
+            this.attackBehavior.sendAttack(target);
+          }
+        } else if (result.attack_terra_nullius) {
+          if (this.attackBehavior) {
+            this.attackBehavior.sendAttack(mg.terraNullius());
+          }
+        } else if (result.attack_random) {
+          if (this.attackBehavior) {
+            this.attackBehavior.attackRandomTarget();
+          }
+        }
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
+  {
     modulePath: "../src/core/execution/SpawnExecution",
     className: "SpawnExecution",
     method: "tick",
@@ -474,6 +616,28 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load SpawnExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for BotExecution
+          if (patch.className === "BotExecution") {
+            try {
+              const aiAttackMod = await import(
+                "../src/core/execution/utils/AiAttackBehavior"
+              );
+              const allianceExtMod = await import(
+                "../src/core/execution/alliance/AllianceExtensionExecution"
+              );
+
+              // Store on prototype for access in patched method
+              proto._AiAttackBehavior = aiAttackMod.AiAttackBehavior;
+              proto._AllianceExtensionExecution =
+                allianceExtMod.AllianceExtensionExecution;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load BotExecution dependencies:",
                 depErr,
               );
             }
