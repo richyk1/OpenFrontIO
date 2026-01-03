@@ -139,6 +139,57 @@ interface AsyncPatch {
 
 const ASYNC_PATCHES: AsyncPatch[] = [
   {
+    modulePath: "../src/core/execution/AttackExecution",
+    className: "AttackExecution",
+    method: "addNeighbors",
+    patchFn: (rustCore, proto) => {
+      // Patch addNeighbors to use Rust for priority queue and random
+      const originalAddNeighbors = proto.addNeighbors;
+
+      proto.addNeighbors = function (this: any, tile: number) {
+        // Get or create Rust AttackExecution instance
+        this._rustExec ??= new rustCore.AttackExecution(BigInt(123));
+
+        const attack = this.attack;
+        const mg = this.mg;
+        const target = this.target;
+        const owner = this._owner;
+
+        if (!attack || !mg) {
+          originalAddNeighbors.call(this, tile);
+          return;
+        }
+
+        const tickNow = mg.ticks();
+
+        for (const neighbor of mg.neighbors(tile)) {
+          if (mg.isWater(neighbor) || mg.owner(neighbor) !== target) {
+            continue;
+          }
+          attack.addBorderTile(neighbor);
+
+          let numOwnedByMe = 0;
+          for (const n of mg.neighbors(neighbor)) {
+            if (mg.owner(n) === owner) {
+              numOwnedByMe++;
+            }
+          }
+
+          // Use Rust for priority calculation (uses Rust random for determinism)
+          const priority = this._rustExec.calculatePriority(
+            numOwnedByMe,
+            mg.terrainType(neighbor),
+            tickNow,
+          );
+
+          this.toConquer.enqueue(neighbor, priority);
+        }
+      };
+
+      proto._originalAddNeighbors = originalAddNeighbors;
+    },
+  },
+  {
     modulePath: "../src/core/execution/PlayerExecution",
     className: "PlayerExecution",
     method: "calculateClusters",
