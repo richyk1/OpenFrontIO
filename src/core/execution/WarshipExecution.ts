@@ -195,7 +195,7 @@ export class WarshipExecution implements Execution {
           this.warship.touch();
           break;
         case PathFindResultType.PathNotFound:
-          console.log(`path not found to target`);
+          // Trade ship may be unreachable - warship will find new target
           break;
       }
     }
@@ -225,7 +225,7 @@ export class WarshipExecution implements Execution {
         this.warship.touch();
         return;
       case PathFindResultType.PathNotFound:
-        console.warn(`path not found to target tile`);
+        // Normal behavior - warship will pick a new random patrol target
         this.warship.setTargetTile(undefined);
         break;
     }
