@@ -48,6 +48,39 @@ interface SpawnAction {
 }
 
 /**
+ * ClusterGameState - matches Rust struct for cluster calculations
+ */
+interface ClusterGameState {
+  width: number;
+  height: number;
+  player_id: number;
+  owner_data: number[];
+  border_tiles: number[];
+  shore_tiles: boolean[];
+  ocean_shore_tiles: boolean[];
+  edge_tiles: boolean[];
+  friendly_players: number[];
+}
+
+/**
+ * ClusterResult - result from Rust calculateClusters
+ */
+interface ClusterResult {
+  clusters: number[][];
+  largest_cluster_index: number | null;
+  largest_cluster_bbox: [number, number, number, number] | null;
+}
+
+/**
+ * SurroundedClusterInfo - result from Rust checkSurroundedClusters
+ */
+interface SurroundedClusterInfo {
+  cluster_index: number;
+  surrounded_by: number | null;
+  should_remove: boolean;
+}
+
+/**
  * Load the Rust WASM module from openfront-core
  */
 function loadRustCore(): RustCore {
@@ -80,6 +113,179 @@ interface AsyncPatch {
 }
 
 const ASYNC_PATCHES: AsyncPatch[] = [
+  {
+    modulePath: "../src/core/execution/PlayerExecution",
+    className: "PlayerExecution",
+    method: "calculateClusters",
+    patchFn: (rustCore, proto) => {
+      const originalCalculateClusters = proto.calculateClusters;
+
+      // Patch calculateClusters to use Rust
+      proto.calculateClusters = function (this: any): Set<number>[] {
+        const mg = this.mg;
+        const player = this.player;
+        if (!mg || !player) return [];
+
+        const borderTiles = player.borderTiles();
+        if (borderTiles.size === 0) return [];
+
+        const width = mg.width();
+        const height = mg.height();
+        const totalTiles = width * height;
+
+        // Build owner data array
+        const ownerData: number[] = new Array(totalTiles);
+        for (let i = 0; i < totalTiles; i++) {
+          ownerData[i] = mg.hasOwner(i) ? mg.ownerID(i) : -1;
+        }
+
+        // Build shore and edge data
+        const shoreTiles: boolean[] = new Array(totalTiles);
+        const oceanShoreTiles: boolean[] = new Array(totalTiles);
+        const edgeTiles: boolean[] = new Array(totalTiles);
+        for (let i = 0; i < totalTiles; i++) {
+          shoreTiles[i] = mg.isShore(i);
+          oceanShoreTiles[i] = mg.isOceanShore(i);
+          edgeTiles[i] = mg.isOnEdgeOfMap(i);
+        }
+
+        // Get friendly players
+        const friendlyPlayers: number[] = [];
+        for (const p of mg.allPlayers()) {
+          if (p !== player && player.isFriendly(p)) {
+            friendlyPlayers.push(p.smallID());
+          }
+        }
+
+        const gameState: ClusterGameState = {
+          width,
+          height,
+          player_id: player.smallID(),
+          owner_data: ownerData,
+          border_tiles: Array.from(borderTiles),
+          shore_tiles: shoreTiles,
+          ocean_shore_tiles: oceanShoreTiles,
+          edge_tiles: edgeTiles,
+          friendly_players: friendlyPlayers,
+        };
+
+        // Call Rust calculateClusters
+        const resultJson = rustCore.calculateClusters(
+          JSON.stringify(gameState),
+        );
+        const result: ClusterResult = JSON.parse(resultJson);
+
+        if (result.clusters.length === 0) {
+          return [];
+        }
+
+        // Store cluster info for use in removeClusters
+        this._rustClusters = result;
+        this._rustGameState = gameState;
+
+        // Convert to Set<number>[] to match JS return type
+        return result.clusters.map((cluster: number[]) => new Set(cluster));
+      };
+
+      // Store original
+      proto._originalCalculateClusters = originalCalculateClusters;
+
+      // Patch removeClusters to use Rust surrounded checks
+      const originalRemoveClusters = proto.removeClusters;
+
+      proto.removeClusters = function (this: any) {
+        const clusters = this.calculateClusters();
+
+        if (clusters.length === 0) {
+          this.player.largestClusterBoundingBox = null;
+          return;
+        }
+
+        // Find the largest cluster
+        let largestIndex = 0;
+        let largestSize = clusters[0].size;
+        for (let i = 1; i < clusters.length; i++) {
+          const size = clusters[i].size;
+          if (size > largestSize) {
+            largestSize = size;
+            largestIndex = i;
+          }
+        }
+
+        const largestCluster = clusters[largestIndex];
+        if (largestCluster === undefined) throw new Error("No clusters");
+
+        // Use Rust bounding box if available
+        if (this._rustClusters?.largest_cluster_bbox) {
+          const [minX, minY, maxX, maxY] =
+            this._rustClusters.largest_cluster_bbox;
+          this.player.largestClusterBoundingBox = { minX, minY, maxX, maxY };
+        } else {
+          // Fallback to JS calculation
+          const mg = this.mg;
+          const calculateBoundingBox = (
+            _mg: any,
+            tiles: Set<number>,
+          ): { minX: number; minY: number; maxX: number; maxY: number } => {
+            let minX = Infinity,
+              minY = Infinity,
+              maxX = -Infinity,
+              maxY = -Infinity;
+            for (const tile of tiles) {
+              const x = tile % mg.width();
+              const y = Math.floor(tile / mg.width());
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+            return { minX, minY, maxX, maxY };
+          };
+          this.player.largestClusterBoundingBox = calculateBoundingBox(
+            mg,
+            largestCluster,
+          );
+        }
+
+        // Use Rust surrounded checks if we have state
+        if (this._rustClusters && this._rustGameState) {
+          const clustersJson = JSON.stringify(this._rustClusters.clusters);
+          const resultJson = rustCore.checkSurroundedClusters(
+            JSON.stringify(this._rustGameState),
+            clustersJson,
+            largestIndex,
+          );
+          const surroundedInfo: SurroundedClusterInfo[] =
+            JSON.parse(resultJson);
+
+          for (const info of surroundedInfo) {
+            if (info.should_remove) {
+              const cluster = clusters[info.cluster_index];
+              if (info.cluster_index === largestIndex) {
+                // For largest cluster, check if surrounded by enemy
+                if (
+                  info.surrounded_by !== null &&
+                  info.surrounded_by !== undefined
+                ) {
+                  const enemy = this.mg.playerBySmallID(info.surrounded_by);
+                  if (enemy && !enemy.isFriendly(this.player)) {
+                    this.removeCluster(cluster);
+                  }
+                }
+              } else {
+                this.removeCluster(cluster);
+              }
+            }
+          }
+        } else {
+          // Fallback to original JS implementation
+          originalRemoveClusters.call(this);
+        }
+      };
+
+      proto._originalRemoveClusters = originalRemoveClusters;
+    },
+  },
   {
     modulePath: "../src/core/execution/SpawnExecution",
     className: "SpawnExecution",
