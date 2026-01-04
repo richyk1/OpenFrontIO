@@ -2704,6 +2704,41 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/DefensePostExecution",
+    className: "DefensePostExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch DefensePostExecution to use Rust for state management
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        // Initialize Rust state if needed
+        this._rustDefensePostState ??= new rustCore.DefensePostState();
+
+        if (!this.post.isActive()) {
+          this._rustDefensePostState.setInactive();
+          this.active = false;
+          return;
+        }
+
+        // Do nothing while the structure is under construction
+        if (this.post.isUnderConstruction()) {
+          return;
+        }
+
+        if (this.target !== null && !this.target.isActive()) {
+          this._rustDefensePostState.setHasTarget(false);
+          this.target = null;
+        }
+
+        // Note: Targeting and shooting logic is currently disabled in JS
+        // When re-enabled, use this._rustDefensePostState.canShoot() for rate limiting
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
