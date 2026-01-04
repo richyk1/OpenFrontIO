@@ -1814,6 +1814,150 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalCurrentIndex = originalCurrentIndex;
     },
   },
+  {
+    modulePath: "../src/core/execution/MIRVExecution",
+    className: "MirvExecution",
+    method: "separate",
+    patchFn: (rustCore, proto) => {
+      // Patch the separate method to use Rust for warhead distribution
+      const originalSeparate = proto.separate;
+      const originalRandomLand = proto.randomLand;
+      const originalProximityCheck = proto.proximityCheck;
+
+      proto.separate = function (this: any) {
+        if (this.nuke === null) throw new Error("uninitialized");
+
+        const mg = this.mg;
+        const dst = this.dst;
+        const targetPlayer = this.targetPlayer;
+        const player = this.player;
+
+        // Use Rust WarheadDistributor
+        const seed = BigInt(mg.ticks()) + BigInt(player.id().length * 1000);
+        const distributor = new rustCore.WarheadDistributor(
+          mg.x(dst),
+          mg.y(dst),
+          seed,
+        );
+
+        // Try to fill with valid targets
+        let attempts = 1000;
+        while (attempts > 0 && !distributor.isFull()) {
+          attempts--;
+          const candidate = distributor.generateCandidate();
+          const x = candidate[0];
+          const y = candidate[1];
+
+          // Validate in JS (needs game state access)
+          if (!mg.isValidCoord(x, y)) continue;
+          const tile = mg.ref(x, y);
+          if (!mg.isLand(tile)) continue;
+          if (mg.owner(tile) !== targetPlayer) continue;
+
+          // Use Rust for proximity/range check via tryAddTarget
+          distributor.tryAddTarget(x, y);
+        }
+
+        // Get sorted targets and spawn warheads
+        const sorted = distributor.getSortedTargets();
+        const NukeExecution = this._NukeExecution;
+        const UnitType = this._UnitType;
+
+        for (let i = 0; i < sorted.length; i += 2) {
+          const tx = sorted[i];
+          const ty = sorted[i + 1];
+          const tile = mg.ref(tx, ty);
+          const idx = i / 2;
+
+          mg.addExecution(
+            new NukeExecution(
+              UnitType.MIRVWarhead,
+              player,
+              tile,
+              this.nuke.tile(),
+              distributor.speedForIndex(idx),
+              distributor.randomWait(),
+            ),
+          );
+        }
+
+        this.nuke.delete(false);
+      };
+
+      proto.randomLand = function (
+        this: any,
+        ref: number,
+        taken: number[],
+      ): number | null {
+        // Use Rust MirvCalculator for random land selection
+        if (!this._rustMirvCalc) {
+          const seed =
+            BigInt(this.mg.ticks()) + BigInt(this.player.id().length * 1000);
+          this._rustMirvCalc = new rustCore.MirvCalculator(
+            this.mirvRange,
+            this.warheadCount,
+            55, // min proximity
+            seed,
+          );
+        }
+
+        const mg = this.mg;
+        const targetPlayer = this.targetPlayer;
+        const mirvRange2 = this.mirvRange * this.mirvRange;
+
+        // Convert taken tiles to flat coords
+        const takenFlat: number[] = [];
+        for (const t of taken) {
+          takenFlat.push(mg.x(t), mg.y(t));
+        }
+
+        let tries = 0;
+        while (tries < 100) {
+          tries++;
+          const coord = this._rustMirvCalc.randomCoordInRange(
+            mg.x(ref),
+            mg.y(ref),
+          );
+          const x = coord[0];
+          const y = coord[1];
+
+          if (!mg.isValidCoord(x, y)) continue;
+          const tile = mg.ref(x, y);
+          if (!mg.isLand(tile)) continue;
+          if (mg.euclideanDistSquared(tile, ref) > mirvRange2) continue;
+          if (mg.owner(tile) !== targetPlayer) continue;
+          if (this._rustMirvCalc.proximityCheck(x, y, takenFlat)) continue;
+
+          return tile;
+        }
+        return null;
+      };
+
+      proto.proximityCheck = function (
+        this: any,
+        tile: number,
+        taken: number[],
+      ): boolean {
+        if (!this._rustMirvCalc) {
+          return originalProximityCheck.call(this, tile, taken);
+        }
+        const mg = this.mg;
+        const takenFlat: number[] = [];
+        for (const t of taken) {
+          takenFlat.push(mg.x(t), mg.y(t));
+        }
+        return this._rustMirvCalc.proximityCheck(
+          mg.x(tile),
+          mg.y(tile),
+          takenFlat,
+        );
+      };
+
+      proto._originalSeparate = originalSeparate;
+      proto._originalRandomLand = originalRandomLand;
+      proto._originalProximityCheck = originalProximityCheck;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -2060,6 +2204,25 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load TransportShipExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for MirvExecution
+          if (patch.className === "MirvExecution") {
+            try {
+              const nukeExecMod = await import(
+                "../src/core/execution/NukeExecution"
+              );
+              const gameMod = await import("../src/core/game/Game");
+
+              // Store on prototype for access in patched method
+              proto._NukeExecution = nukeExecMod.NukeExecution;
+              proto._UnitType = gameMod.UnitType;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load MirvExecution dependencies:",
                 depErr,
               );
             }
