@@ -1724,6 +1724,96 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalIsOnEdgeOfMap = originalIsOnEdgeOfMap;
     },
   },
+  {
+    modulePath: "../src/core/pathfinding/PathFinding",
+    className: "ParabolaPathFinder",
+    method: "computeControlPoints",
+    patchFn: (rustCore, proto) => {
+      // Replace ParabolaPathFinder with Rust implementation
+      const originalComputeControlPoints = proto.computeControlPoints;
+      const originalNextTile = proto.nextTile;
+      const originalAllTiles = proto.allTiles;
+      const originalCurrentIndex = proto.currentIndex;
+
+      proto.computeControlPoints = function (
+        this: any,
+        orig: number,
+        dst: number,
+        increment: number = 3,
+        distanceBasedHeight: boolean = true,
+        directionUp: boolean = true,
+      ) {
+        // Get coordinates from map
+        const mg = this.mg;
+        if (!mg) {
+          return originalComputeControlPoints.call(
+            this,
+            orig,
+            dst,
+            increment,
+            distanceBasedHeight,
+            directionUp,
+          );
+        }
+
+        const origX = mg.x(orig);
+        const origY = mg.y(orig);
+        const dstX = mg.x(dst);
+        const dstY = mg.y(dst);
+
+        // Create Rust ParabolaPathFinder
+        this._rustPathFinder = new rustCore.ParabolaPathFinder(
+          mg.width(),
+          mg.height(),
+        );
+        this._rustPathFinder.computeControlPoints(
+          origX,
+          origY,
+          dstX,
+          dstY,
+          increment,
+          distanceBasedHeight,
+          directionUp,
+        );
+        this._mg = mg;
+      };
+
+      proto.nextTile = function (this: any, speed: number): number | true {
+        if (!this._rustPathFinder || !this._mg) {
+          return originalNextTile.call(this, speed);
+        }
+        const result = this._rustPathFinder.nextTile(speed);
+        if (result.length === 0) {
+          return true; // Reached destination
+        }
+        return this._mg.ref(result[0], result[1]);
+      };
+
+      proto.currentIndex = function (this: any): number {
+        if (this._rustPathFinder) {
+          return this._rustPathFinder.currentIndex();
+        }
+        return originalCurrentIndex.call(this);
+      };
+
+      proto.allTiles = function (this: any): number[] {
+        if (!this._rustPathFinder || !this._mg) {
+          return originalAllTiles.call(this);
+        }
+        const flat = this._rustPathFinder.allTilesFlat();
+        const tiles: number[] = [];
+        for (let i = 0; i < flat.length; i += 2) {
+          tiles.push(this._mg.ref(flat[i], flat[i + 1]));
+        }
+        return tiles;
+      };
+
+      proto._originalComputeControlPoints = originalComputeControlPoints;
+      proto._originalNextTile = originalNextTile;
+      proto._originalAllTiles = originalAllTiles;
+      proto._originalCurrentIndex = originalCurrentIndex;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
