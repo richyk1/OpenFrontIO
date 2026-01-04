@@ -972,6 +972,208 @@ const ASYNC_PATCHES: AsyncPatch[] = [
     },
   },
   {
+    modulePath: "../src/core/execution/TradeShipExecution",
+    className: "TradeShipExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      const originalTick = proto.tick;
+      const originalInit = proto.init;
+
+      // Patch init to create Rust instance
+      proto.init = function (this: any, mg: any, ticks: number) {
+        originalInit.call(this, mg, ticks);
+
+        // Create Rust TradeShipExecution instance after JS init
+        this._rustExec ??= new rustCore.TradeShipExecution();
+      };
+
+      proto.tick = function (this: any, ticks: number) {
+        // Fallback to original if no Rust instance
+        if (!this._rustExec) {
+          originalTick.call(this, ticks);
+          return;
+        }
+
+        // Ship creation - first tick
+        if (this.tradeShip === undefined) {
+          const spawn = this.origOwner.canBuild(
+            this._UnitType?.TradeShip ?? 10,
+            this.srcPort.tile(),
+          );
+          if (spawn === false) {
+            console.warn(`cannot build trade ship`);
+            this.active = false;
+            this._rustExec.setActive(false);
+            return;
+          }
+          this.tradeShip = this.origOwner.buildUnit(
+            this._UnitType?.TradeShip ?? 10,
+            spawn,
+            {
+              targetUnit: this._dstPort,
+              lastSetSafeFromPirates: ticks,
+            },
+          );
+          this.mg.stats().boatSendTrade(this.origOwner, this._dstPort.owner());
+        }
+
+        if (!this.tradeShip.isActive()) {
+          this.active = false;
+          this._rustExec.setActive(false);
+          return;
+        }
+
+        const tradeShipOwner = this.tradeShip.owner();
+        const dstPortOwner = this._dstPort.owner();
+
+        // Use Rust to check capture
+        this._rustExec.checkCapture(this.origOwner !== tradeShipOwner);
+        const wasCaptured = this._rustExec.wasCaptured;
+
+        // If a player captures another player's port while trading we should delete the ship.
+        if (dstPortOwner.id() === this.srcPort.owner().id()) {
+          this.tradeShip.delete(false);
+          this.active = false;
+          this._rustExec.setActive(false);
+          return;
+        }
+
+        if (
+          !wasCaptured &&
+          (!this._dstPort.isActive() || !tradeShipOwner.canTrade(dstPortOwner))
+        ) {
+          this.tradeShip.delete(false);
+          this.active = false;
+          this._rustExec.setActive(false);
+          return;
+        }
+
+        if (
+          wasCaptured &&
+          (tradeShipOwner !== dstPortOwner || !this._dstPort.isActive())
+        ) {
+          const distSortUnit = this._distSortUnit;
+          const ports = this.tradeShip
+            .owner()
+            .units(this._UnitType?.Port ?? 5)
+            .sort(
+              distSortUnit ? distSortUnit(this.mg, this.tradeShip) : undefined,
+            );
+          if (ports.length === 0) {
+            this.tradeShip.delete(false);
+            this.active = false;
+            this._rustExec.setActive(false);
+            return;
+          } else {
+            this._dstPort = ports[0];
+            this.tradeShip.setTargetUnit(this._dstPort);
+          }
+        }
+
+        const curTile = this.tradeShip.tile();
+        if (curTile === this.dstPort()) {
+          this.complete();
+          return;
+        }
+
+        const result = this.pathFinder.nextTile(curTile, this._dstPort.tile());
+        const PathFindResultType = this._PathFindResultType;
+
+        switch (result.type) {
+          case PathFindResultType?.Pending:
+            this.tradeShip.move(curTile);
+            break;
+          case PathFindResultType?.NextTile:
+            if (
+              this.mg.isWater(result.node) &&
+              this.mg.isShoreline(result.node)
+            ) {
+              this.tradeShip.setSafeFromPirates();
+            }
+            this.tradeShip.move(result.node);
+            // Use Rust to track tiles traveled
+            this._rustExec.incrementTilesTraveled();
+            break;
+          case PathFindResultType?.Completed:
+            this.complete();
+            break;
+          case PathFindResultType?.PathNotFound:
+            console.warn("captured trade ship cannot find route");
+            if (this.tradeShip.isActive()) {
+              this.tradeShip.delete(false);
+            }
+            this.active = false;
+            this._rustExec.setActive(false);
+            break;
+        }
+      };
+
+      // Patch complete to use Rust tilesTraveled
+      const originalComplete = proto.complete;
+      proto.complete = function (this: any) {
+        if (!this._rustExec) {
+          originalComplete.call(this);
+          return;
+        }
+
+        this.active = false;
+        this._rustExec.setActive(false);
+        this.tradeShip.delete(false);
+
+        // Use Rust tilesTraveled for gold calculation
+        const tilesTraveled = this._rustExec.tilesTraveled;
+        const gold = this.mg
+          .config()
+          .tradeShipGold(
+            tilesTraveled,
+            this.tradeShip.owner().unitCount(this._UnitType?.Port ?? 5),
+          );
+
+        const wasCaptured = this._rustExec.wasCaptured;
+        const renderNumber = this._renderNumber;
+
+        if (wasCaptured) {
+          this.tradeShip.owner().addGold(gold, this._dstPort.tile());
+          if (renderNumber) {
+            this.mg.displayMessage(
+              `Received ${renderNumber(gold)} gold from ship captured from ${this.origOwner.displayName()}`,
+              this._MessageType?.CAPTURED_ENEMY_UNIT,
+              this.tradeShip.owner().id(),
+              gold,
+            );
+          }
+          this.mg
+            .stats()
+            .boatCapturedTrade(this.tradeShip.owner(), this.origOwner, gold);
+        } else {
+          this.srcPort.owner().addGold(gold);
+          this._dstPort.owner().addGold(gold, this._dstPort.tile());
+          if (renderNumber) {
+            this.mg.displayMessage(
+              `Received ${renderNumber(gold)} gold from trade with ${this.srcPort.owner().displayName()}`,
+              this._MessageType?.RECEIVED_GOLD_FROM_TRADE,
+              this._dstPort.owner().id(),
+              gold,
+            );
+            this.mg.displayMessage(
+              `Received ${renderNumber(gold)} gold from trade with ${this._dstPort.owner().displayName()}`,
+              this._MessageType?.RECEIVED_GOLD_FROM_TRADE,
+              this.srcPort.owner().id(),
+              gold,
+            );
+          }
+          this.mg
+            .stats()
+            .boatArriveTrade(this.srcPort.owner(), this._dstPort.owner(), gold);
+        }
+      };
+
+      proto._originalTick = originalTick;
+      proto._originalInit = originalInit;
+      proto._originalComplete = originalComplete;
+    },
+  },
+  {
     modulePath: "../src/core/execution/TransportShipExecution",
     className: "TransportShipExecution",
     method: "tick",
@@ -1300,6 +1502,28 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load WarshipExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for TradeShipExecution
+          if (patch.className === "TradeShipExecution") {
+            try {
+              const astarMod = await import("../src/core/pathfinding/AStar");
+              const gameMod = await import("../src/core/game/Game");
+              const utilsMod = await import("../src/client/Utils");
+              const utilMod = await import("../src/core/Util");
+
+              // Store on prototype for access in patched method
+              proto._PathFindResultType = astarMod.PathFindResultType;
+              proto._UnitType = gameMod.UnitType;
+              proto._MessageType = gameMod.MessageType;
+              proto._renderNumber = utilsMod.renderNumber;
+              proto._distSortUnit = utilMod.distSortUnit;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load TradeShipExecution dependencies:",
                 depErr,
               );
             }
