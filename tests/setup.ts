@@ -2435,6 +2435,147 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/NukeExecution",
+    className: "NukeExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch NukeExecution to use Rust for trajectory and movement
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const mg = this.mg;
+        const UnitType = this._UnitType;
+        const MessageType = this._MessageType;
+
+        // First tick - build nuke and initialize trajectory
+        if (this.nuke === null) {
+          const spawn = this.player.canBuild(this.nukeType, this.dst);
+          if (spawn === false) {
+            console.warn(`cannot build Nuke`);
+            this.active = false;
+            return;
+          }
+          this.src = spawn;
+
+          // Initialize Rust nuke state
+          let speed = this.speed;
+          if (speed === -1) {
+            speed = mg.config().defaultNukeSpeed();
+          }
+          const targetRangeSquared =
+            mg.config().defaultNukeTargetableRange() ** 2;
+
+          this._rustNukeState = new rustCore.NukeState(
+            mg.width(),
+            mg.height(),
+            speed,
+            targetRangeSquared,
+            this.waitTicks,
+          );
+
+          // Initialize trajectory in Rust
+          const distanceBasedHeight = this.nukeType !== UnitType.MIRVWarhead;
+          this._rustNukeState.initTrajectory(
+            mg.x(spawn),
+            mg.y(spawn),
+            mg.x(this.dst),
+            mg.y(this.dst),
+            distanceBasedHeight,
+            this.rocketDirectionUp,
+          );
+
+          // Build trajectory for the unit using Rust
+          const trajectoryFlat =
+            this._rustNukeState.buildTrajectoryWithTargetability();
+          const trajectory = [];
+          for (let i = 0; i < trajectoryFlat.length; i += 3) {
+            const x = trajectoryFlat[i];
+            const y = trajectoryFlat[i + 1];
+            const targetable = trajectoryFlat[i + 2] === 1.0;
+            trajectory.push({ tile: mg.ref(x, y), targetable });
+          }
+
+          // Build nuke unit with trajectory
+          this.nuke = this.player.buildUnit(this.nukeType, spawn, {
+            targetTile: this.dst,
+            trajectory,
+          });
+
+          // Maybe break alliances (keep original logic)
+          if (this.nuke.type() !== UnitType.MIRVWarhead) {
+            this.maybeBreakAlliances(this.tilesInRange());
+          }
+
+          // Display incoming message
+          if (mg.hasOwner(this.dst)) {
+            const target = mg.owner(this.dst);
+            if (target.isPlayer()) {
+              if (this.nukeType === UnitType.AtomBomb) {
+                mg.displayIncomingUnit(
+                  this.nuke.id(),
+                  `${this.player.name()} - atom bomb inbound`,
+                  MessageType.NUKE_INBOUND,
+                  target.id(),
+                );
+              } else if (this.nukeType === UnitType.HydrogenBomb) {
+                mg.displayIncomingUnit(
+                  this.nuke.id(),
+                  `${this.player.name()} - hydrogen bomb inbound`,
+                  MessageType.HYDROGEN_BOMB_INBOUND,
+                  target.id(),
+                );
+              }
+              mg.stats().bombLaunch(this.player, target, this.nukeType);
+            }
+          }
+
+          // Set silo on cooldown
+          const silo = this.player
+            .units(UnitType.MissileSilo)
+            .find((s: any) => s.tile() === spawn);
+          if (silo) {
+            silo.launch();
+          }
+          return;
+        }
+
+        // Nuke was intercepted
+        if (!this.nuke.isActive()) {
+          console.log(`Nuke destroyed before reaching target`);
+          this.active = false;
+          return;
+        }
+
+        // Compute next position using Rust
+        const result = this._rustNukeState.computeNextPosition();
+        const nextX = result[0];
+        const nextY = result[1];
+        const arrived = result[2] === 1.0;
+
+        if (arrived) {
+          // Detonate using original method
+          this.detonate();
+          return;
+        }
+
+        // Update targetability using Rust
+        const currentTile = this.nuke.tile();
+        const isTargetable = this._rustNukeState.isTargetable(
+          mg.x(currentTile),
+          mg.y(currentTile),
+        );
+        this.nuke.setTargetable(isTargetable);
+
+        // Move to the new position
+        const nextTile = mg.ref(nextX, nextY);
+        this.nuke.move(nextTile);
+        this.nuke.setTrajectoryIndex(this._rustNukeState.getCurrentIndex());
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -2597,6 +2738,22 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load ShellExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for NukeExecution
+          if (patch.className === "NukeExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+              proto._MessageType = gameMod.MessageType;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load NukeExecution dependencies:",
                 depErr,
               );
             }
