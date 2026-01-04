@@ -2254,6 +2254,97 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/SAMMissileExecution",
+    className: "SAMMissileExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch SAMMissileExecution to use Rust for pathfinding
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const mg = this.mg;
+        const UnitType = this._UnitType;
+        const MessageType = this._MessageType;
+
+        // Build the SAM missile if not yet built
+        this.SAMMissile ??= this._owner.buildUnit(
+          UnitType.SAMMissile,
+          this.spawn,
+          {},
+        );
+
+        if (!this.SAMMissile.isActive()) {
+          this.active = false;
+          return;
+        }
+
+        // Validate target - only AtomBomb and HydrogenBomb are valid
+        const targetType = this.target.type();
+        const targetTypeCode =
+          targetType === UnitType.AtomBomb
+            ? 0
+            : targetType === UnitType.HydrogenBomb
+              ? 1
+              : 2;
+
+        if (
+          !this.target.isActive() ||
+          !this.ownerUnit.isActive() ||
+          this.target.owner() === this.SAMMissile.owner() ||
+          !rustCore.isValidSamTarget(targetTypeCode)
+        ) {
+          this.SAMMissile.delete(false);
+          this.active = false;
+          return;
+        }
+
+        // Initialize Rust missile state if needed
+        if (!this._rustMissileState) {
+          const targetTile = this.targetTile;
+          this._rustMissileState = new rustCore.SAMMissileState(
+            BigInt(mg.ticks()),
+            this.speed,
+            mg.x(targetTile),
+            mg.y(targetTile),
+          );
+        }
+
+        // Compute next position using Rust
+        const currentTile = this.SAMMissile.tile();
+        const result = this._rustMissileState.computeNextPosition(
+          mg.x(currentTile),
+          mg.y(currentTile),
+        );
+
+        const nextX = result[0];
+        const nextY = result[1];
+        const arrived = result[2] === 1;
+
+        if (arrived) {
+          // Intercepted the target
+          mg.displayMessage(
+            `Missile intercepted ${this.target.type()}`,
+            MessageType.SAM_HIT,
+            this._owner.id(),
+          );
+          this.active = false;
+          this.target.delete(true, this._owner);
+          this.SAMMissile.delete(false);
+
+          // Record stats
+          mg.stats().bombIntercept(this._owner, this.target.type(), 1);
+          return;
+        }
+
+        // Move to the new position
+        const nextTile = mg.ref(nextX, nextY);
+        this.SAMMissile.move(nextTile);
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -2540,6 +2631,22 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load SAMLauncherExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for SAMMissileExecution
+          if (patch.className === "SAMMissileExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+              proto._MessageType = gameMod.MessageType;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load SAMMissileExecution dependencies:",
                 depErr,
               );
             }
