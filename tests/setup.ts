@@ -2651,6 +2651,17 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/ConstructionExecution",
+    className: "ConstructionExecution",
+    method: "isStructure",
+    patchFn: (rustCore, proto) => {
+      // Patch isStructure to use Rust implementation
+      proto.isStructure = function (this: any, type: string): boolean {
+        return rustCore.isStructureType(type);
+      };
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
