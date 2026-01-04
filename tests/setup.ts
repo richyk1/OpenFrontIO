@@ -1174,6 +1174,93 @@ const ASYNC_PATCHES: AsyncPatch[] = [
     },
   },
   {
+    modulePath: "../src/core/execution/PortExecution",
+    className: "PortExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      const originalTick = proto.tick;
+      const originalInit = proto.init;
+
+      // Patch init to create Rust instance
+      proto.init = function (this: any, mg: any, ticks: number) {
+        originalInit.call(this, mg, ticks);
+
+        // Create Rust PortExecution instance after JS init
+        this._rustExec ??= new rustCore.PortExecution(mg.ticks());
+      };
+
+      proto.tick = function (this: any, ticks: number) {
+        // Fallback to original if no Rust instance
+        if (!this._rustExec) {
+          originalTick.call(this, ticks);
+          return;
+        }
+
+        if (!this.port.isActive()) {
+          this.active = false;
+          this._rustExec.setActive(false);
+          return;
+        }
+
+        if (this.port.isUnderConstruction()) {
+          return;
+        }
+
+        if (!this.port.hasTrainStation()) {
+          this.createStation();
+        }
+
+        // Use Rust to check if should check this tick (every 10 ticks)
+        if (!this._rustExec.shouldCheckThisTick(this.mg.ticks())) {
+          return;
+        }
+
+        // Use Rust for spawn rate calculation
+        const numTradeShips = this.mg.unitCount(
+          this._UnitType?.TradeShip ?? 10,
+        );
+        const numPlayerPorts = this.port
+          .owner()
+          .unitCount(this._UnitType?.Port ?? 5);
+        const numPlayerTradeShips = this.port
+          .owner()
+          .unitCount(this._UnitType?.TradeShip ?? 10);
+        const spawnRate = this.mg
+          .config()
+          .tradeShipSpawnRate(
+            numTradeShips,
+            numPlayerPorts,
+            numPlayerTradeShips,
+          );
+
+        if (
+          !this._rustExec.shouldSpawnTradeShip(spawnRate, this.port.level())
+        ) {
+          return;
+        }
+
+        const ports = this.tradingPorts();
+
+        if (ports.length === 0) {
+          return;
+        }
+
+        // Use Rust for random port selection
+        const idx = this._rustExec.randIndex(ports.length);
+        const port = ports[idx];
+
+        if (this._TradeShipExecution) {
+          this.mg.addExecution(
+            new this._TradeShipExecution(this.port.owner(), this.port, port),
+          );
+        }
+      };
+
+      proto._originalTick = originalTick;
+      proto._originalInit = originalInit;
+    },
+  },
+  {
     modulePath: "../src/core/execution/TransportShipExecution",
     className: "TransportShipExecution",
     method: "tick",
@@ -1524,6 +1611,25 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load TradeShipExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for PortExecution
+          if (patch.className === "PortExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+              const tradeShipExecMod = await import(
+                "../src/core/execution/TradeShipExecution"
+              );
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+              proto._TradeShipExecution = tradeShipExecMod.TradeShipExecution;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load PortExecution dependencies:",
                 depErr,
               );
             }
