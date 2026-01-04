@@ -760,6 +760,218 @@ const ASYNC_PATCHES: AsyncPatch[] = [
     },
   },
   {
+    modulePath: "../src/core/execution/WarshipExecution",
+    className: "WarshipExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      const originalTick = proto.tick;
+      const originalInit = proto.init;
+      const originalRandomTile = proto.randomTile;
+      const originalFindTargetUnit = proto.findTargetUnit;
+      const originalShootTarget = proto.shootTarget;
+
+      // Patch init to create Rust instance
+      proto.init = function (this: any, mg: any, ticks: number) {
+        originalInit.call(this, mg, ticks);
+
+        // Create Rust WarshipExecution instance after JS init
+        this._rustExec ??= new rustCore.WarshipExecution(mg.ticks());
+      };
+
+      // Patch shootTarget to use Rust for timing
+      proto.shootTarget = function (this: any) {
+        if (!this._rustExec || !this.mg || !this.warship) {
+          originalShootTarget.call(this);
+          return;
+        }
+
+        const shellAttackRate = this.mg.config().warshipShellAttackRate();
+        const currentTick = this.mg.ticks();
+
+        // Use Rust to check if we should shoot
+        if (this._rustExec.shouldShoot(currentTick, shellAttackRate)) {
+          const targetUnit = this.warship.targetUnit();
+          if (targetUnit) {
+            // Record attack time (skip for TransportShip - no reload needed)
+            if (targetUnit.type() !== this._UnitType?.TransportShip) {
+              this._rustExec.recordShellAttack(currentTick);
+            }
+
+            // Add shell execution (keep in JS)
+            if (this._ShellExecution) {
+              this.mg.addExecution(
+                new this._ShellExecution(
+                  this.warship.tile(),
+                  this.warship.owner(),
+                  this.warship,
+                  targetUnit,
+                ),
+              );
+            }
+
+            // Don't send multiple shells to target that can be oneshotted
+            if (!targetUnit.hasHealth()) {
+              this.alreadySentShell.add(targetUnit);
+              this.warship.setTargetUnit(undefined);
+            }
+          }
+        }
+      };
+
+      // Patch findTargetUnit to use Rust for prioritization
+      proto.findTargetUnit = function (this: any) {
+        if (!this._rustExec || !this.mg || !this.warship) {
+          return originalFindTargetUnit.call(this);
+        }
+
+        const hasPort =
+          this.warship.owner().unitCount(this._UnitType?.Port ?? 5) > 0;
+        const patrolRangeSquared = this.mg.config().warshipPatrolRange() ** 2;
+
+        const ships = this.mg.nearbyUnits(
+          this.warship.tile(),
+          this.mg.config().warshipTargettingRange(),
+          [
+            this._UnitType?.TransportShip ?? 0,
+            this._UnitType?.Warship ?? 1,
+            this._UnitType?.TradeShip ?? 2,
+          ],
+        );
+
+        const candidates: {
+          unit: any;
+          unitIndex: number;
+          unitType: number;
+          distSquared: number;
+        }[] = [];
+
+        let idx = 0;
+        for (const { unit, distSquared } of ships) {
+          if (
+            unit.owner() === this.warship.owner() ||
+            unit === this.warship ||
+            unit.owner().isFriendly(this.warship.owner(), true) ||
+            this.alreadySentShell.has(unit)
+          ) {
+            continue;
+          }
+
+          const unitType = unit.type();
+          if (unitType === (this._UnitType?.TradeShip ?? 2)) {
+            if (
+              !hasPort ||
+              unit.isSafeFromPirates() ||
+              unit.targetUnit()?.owner() === this.warship.owner() ||
+              unit.targetUnit()?.owner().isFriendly(this.warship.owner())
+            ) {
+              continue;
+            }
+            if (
+              this.mg.euclideanDistSquared(
+                this.warship.patrolTile(),
+                unit.tile(),
+              ) > patrolRangeSquared
+            ) {
+              continue;
+            }
+          }
+
+          // Map unit type to our enum
+          let typeCode = 3; // Other
+          if (unitType === (this._UnitType?.TransportShip ?? 0)) typeCode = 0;
+          else if (unitType === (this._UnitType?.Warship ?? 1)) typeCode = 1;
+          else if (unitType === (this._UnitType?.TradeShip ?? 2)) typeCode = 2;
+
+          candidates.push({
+            unit,
+            unitIndex: idx,
+            unitType: typeCode,
+            distSquared,
+          });
+          idx++;
+        }
+
+        if (candidates.length === 0) {
+          return undefined;
+        }
+
+        // Use Rust for prioritization
+        const candidatesJson = JSON.stringify(
+          candidates.map((c) => ({
+            unit_index: c.unitIndex,
+            unit_type: c.unitType,
+            dist_squared: c.distSquared,
+          })),
+        );
+
+        const resultJson = this._rustExec.prioritizeTargetsJson(candidatesJson);
+        const result = JSON.parse(resultJson);
+
+        if (result.found && result.best_index >= 0) {
+          return candidates[result.best_index].unit;
+        }
+
+        return undefined;
+      };
+
+      // Patch randomTile to use Rust for random offsets
+      proto.randomTile = function (
+        this: any,
+        allowShoreline: boolean = false,
+      ): any {
+        if (!this._rustExec || !this.mg || !this.warship) {
+          return originalRandomTile.call(this, allowShoreline);
+        }
+
+        let warshipPatrolRange = this.mg.config().warshipPatrolRange();
+        const maxAttemptBeforeExpand = 500;
+        let attempts = 0;
+        let expandCount = 0;
+
+        while (expandCount < 3) {
+          // Use Rust for random offset
+          const offset = this._rustExec.randomPatrolOffset(warshipPatrolRange);
+          const x = this.mg.x(this.warship.patrolTile()) + offset[0];
+          const y = this.mg.y(this.warship.patrolTile()) + offset[1];
+
+          if (!this.mg.isValidCoord(x, y)) {
+            continue;
+          }
+
+          const tile = this.mg.ref(x, y);
+          if (
+            !this.mg.isOcean(tile) ||
+            (!allowShoreline && this.mg.isShoreline(tile))
+          ) {
+            attempts++;
+            if (attempts === maxAttemptBeforeExpand) {
+              expandCount++;
+              attempts = 0;
+              warshipPatrolRange =
+                warshipPatrolRange + Math.floor(warshipPatrolRange / 2);
+            }
+            continue;
+          }
+          return tile;
+        }
+
+        console.warn(
+          `Failed to find random tile for warship for ${this.warship.owner().name()}`,
+        );
+        if (!allowShoreline) {
+          return this.randomTile(true);
+        }
+        return undefined;
+      };
+
+      proto._originalTick = originalTick;
+      proto._originalInit = originalInit;
+      proto._originalRandomTile = originalRandomTile;
+      proto._originalFindTargetUnit = originalFindTargetUnit;
+      proto._originalShootTarget = originalShootTarget;
+    },
+  },
+  {
     modulePath: "../src/core/execution/TransportShipExecution",
     className: "TransportShipExecution",
     method: "tick",
@@ -1069,6 +1281,25 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load NationExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for WarshipExecution
+          if (patch.className === "WarshipExecution") {
+            try {
+              const shellExecMod = await import(
+                "../src/core/execution/ShellExecution"
+              );
+              const gameMod = await import("../src/core/game/Game");
+
+              // Store on prototype for access in patched method
+              proto._ShellExecution = shellExecMod.ShellExecution;
+              proto._UnitType = gameMod.UnitType;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load WarshipExecution dependencies:",
                 depErr,
               );
             }
