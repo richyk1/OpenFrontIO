@@ -1958,6 +1958,302 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalProximityCheck = originalProximityCheck;
     },
   },
+  {
+    modulePath: "../src/core/execution/SAMLauncherExecution",
+    className: "SAMLauncherExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch the SAMTargetingSystem to use Rust for interception calculations
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        if (this.mg === null || this.player === null) {
+          throw new Error("Not initialized");
+        }
+
+        // Initialize SAM unit if needed
+        if (this.sam === null) {
+          if (this.tile === null) {
+            throw new Error("tile is null");
+          }
+          const UnitType = this._UnitType;
+          const spawnTile = this.player.canBuild(
+            UnitType.SAMLauncher,
+            this.tile,
+          );
+          if (spawnTile === false) {
+            console.warn("cannot build SAM Launcher");
+            this.active = false;
+            return;
+          }
+          this.sam = this.player.buildUnit(UnitType.SAMLauncher, spawnTile, {});
+        }
+
+        // Initialize Rust targeting system if not yet done
+        if (!this._rustTargetingSystem) {
+          const mg = this.mg;
+          const samTile = this.sam.tile();
+          const samRange = mg.config().samRange(this.sam.level());
+          const missileSpeed = mg.config().defaultSamMissileSpeed();
+          this._rustTargetingSystem = new rustCore.SAMTargetingSystem(
+            mg.x(samTile),
+            mg.y(samTile),
+            samRange,
+            missileSpeed,
+          );
+        }
+
+        if (this.sam.isUnderConstruction()) {
+          return;
+        }
+
+        if (this.sam.isInCooldown()) {
+          const frontTime = this.sam.missileTimerQueue()[0];
+          if (frontTime === undefined) {
+            return;
+          }
+          const cooldown =
+            this.mg.config().SAMCooldown() - (this.mg.ticks() - frontTime);
+
+          if (cooldown <= 0) {
+            this.sam.reloadMissile();
+          }
+          return;
+        }
+
+        if (!this.sam.isActive()) {
+          this.active = false;
+          return;
+        }
+
+        if (this.player !== this.sam.owner()) {
+          this.player = this.sam.owner();
+        }
+
+        const mg = this.mg;
+        const UnitType = this._UnitType;
+        const isUnit = this._isUnit;
+        const MessageType = this._MessageType;
+        const SAMMissileExecution = this._SAMMissileExecution;
+
+        // Check for MIRV warheads first
+        const MIRVWarheadSearchRadius = 400;
+        const MIRVWarheadProtectionRadius = 50;
+        const samTile = this.sam.tile();
+
+        const mirvWarheadTargets = mg.nearbyUnits(
+          samTile,
+          MIRVWarheadSearchRadius,
+          UnitType.MIRVWarhead,
+          ({ unit }: { unit: any }) => {
+            if (!isUnit(unit)) return false;
+            if (unit.owner() === this.player) return false;
+            if (this.player.isFriendly(unit.owner())) return false;
+            const dst = unit.targetTile();
+            if (dst === undefined) return false;
+            // Use Rust for protection range check
+            return rustCore.isMirvTargetInProtectionRange(
+              mg.x(dst),
+              mg.y(dst),
+              mg.x(samTile),
+              mg.y(samTile),
+              MIRVWarheadProtectionRadius,
+            );
+          },
+        );
+
+        let target: { unit: any; tile: any } | null = null;
+
+        if (mirvWarheadTargets.length === 0) {
+          // Use Rust targeting system for nuke interception
+          target = this._getSingleTargetRust(ticks);
+          if (target !== null) {
+            console.log("Target acquired");
+          }
+        }
+
+        const isSingleTarget = target && !target.unit.targetedBySAM();
+        if (isSingleTarget || mirvWarheadTargets.length > 0) {
+          this.sam.launch();
+          const type =
+            mirvWarheadTargets.length > 0
+              ? UnitType.MIRVWarhead
+              : target?.unit.type();
+          if (type === undefined) throw new Error("Unknown unit type");
+
+          if (mirvWarheadTargets.length > 0) {
+            const samOwner = this.sam.owner();
+
+            // Message
+            mg.displayMessage(
+              `${mirvWarheadTargets.length} MIRV warheads intercepted`,
+              MessageType.SAM_HIT,
+              samOwner.id(),
+            );
+
+            mirvWarheadTargets.forEach(({ unit: u }: { unit: any }) => {
+              u.delete();
+            });
+
+            // Record stats
+            mg.stats().bombIntercept(
+              samOwner,
+              UnitType.MIRVWarhead,
+              mirvWarheadTargets.length,
+            );
+          } else if (target !== null) {
+            target.unit.setTargetedBySAM(true);
+            mg.addExecution(
+              new SAMMissileExecution(
+                samTile,
+                this.sam.owner(),
+                this.sam,
+                target.unit,
+                target.tile,
+              ),
+            );
+          } else {
+            throw new Error("target is null");
+          }
+        }
+      };
+
+      // Helper method to get single target using Rust targeting system
+      proto._getSingleTargetRust = function (this: any, ticks: number) {
+        const mg = this.mg;
+        const UnitType = this._UnitType;
+        const isUnit = this._isUnit;
+        const rustSystem = this._rustTargetingSystem;
+
+        // Update SAM position/range in case of upgrades
+        const samTile = this.sam.tile();
+        const samRange = mg.config().samRange(this.sam.level());
+        rustSystem.updatePosition(mg.x(samTile), mg.y(samTile));
+        rustSystem.updateRange(samRange);
+
+        // Look beyond the SAM range for pre-shooting
+        const detectionRange = mg.config().maxSamRange() * 2;
+        const nukes = mg.nearbyUnits(
+          samTile,
+          detectionRange,
+          [UnitType.AtomBomb, UnitType.HydrogenBomb],
+          ({ unit }: { unit: any }) => {
+            return (
+              isUnit(unit) &&
+              unit.owner() !== this.sam.owner() &&
+              !this.sam.owner().isFriendly(unit.owner())
+            );
+          },
+        );
+
+        // Update cache with nearby nukes
+        const nearbyIds = new Int32Array(nukes.map((n: any) => n.unit.id()));
+        rustSystem.updateNearbyNukes(nearbyIds);
+
+        const targets: Array<{ unit: any; tile: any }> = [];
+
+        for (const nuke of nukes) {
+          const nukeId = nuke.unit.id();
+          const cacheStatus = rustSystem.getCacheStatus(nukeId);
+
+          if (cacheStatus === 1) {
+            // Known unreachable, skip
+            continue;
+          }
+
+          if (cacheStatus === 2) {
+            // Cached with interception
+            const fireAtTick = rustSystem.getCachedFireTick(nukeId);
+            if (fireAtTick === ticks) {
+              // Time to shoot!
+              const cached = rustSystem.getCachedInterception(nukeId);
+              targets.push({
+                tile: mg.ref(cached[1], cached[2]),
+                unit: nuke.unit,
+              });
+              rustSystem.removeCached(nukeId);
+              continue;
+            }
+            if (fireAtTick > ticks) {
+              // Not due yet
+              continue;
+            }
+            // Missed the planned tick, recompute
+            rustSystem.removeCached(nukeId);
+          }
+
+          // Compute interception using Rust
+          const trajectory = nuke.unit.trajectory();
+          const currentIndex = nuke.unit.trajectoryIndex();
+
+          // Convert trajectory to flat array for Rust
+          const trajectoryFlat = new Int32Array(trajectory.length * 4);
+          for (let i = 0; i < trajectory.length; i++) {
+            const point = trajectory[i];
+            trajectoryFlat[i * 4] = point.tile;
+            trajectoryFlat[i * 4 + 1] = mg.x(point.tile);
+            trajectoryFlat[i * 4 + 2] = mg.y(point.tile);
+            trajectoryFlat[i * 4 + 3] = point.targetable ? 1 : 0;
+          }
+
+          const result = rustSystem.computeInterception(
+            trajectoryFlat,
+            currentIndex,
+          );
+
+          if (result.found) {
+            if (result.ticks_until_fire <= 1) {
+              // Shoot instantly
+              targets.push({
+                unit: nuke.unit,
+                tile: mg.ref(result.x, result.y),
+              });
+            } else {
+              // Cache for later
+              rustSystem.cacheInterception(
+                nukeId,
+                result.tile,
+                result.x,
+                result.y,
+                result.ticks_until_fire + ticks,
+              );
+            }
+          } else {
+            // Mark as unreachable
+            rustSystem.markUnreachable(nukeId);
+          }
+        }
+
+        if (targets.length === 0) {
+          return null;
+        }
+
+        // Use Rust to prioritize targets (hydrogen bombs first)
+        const targetsFlat = new Int32Array(targets.length * 5);
+        for (let i = 0; i < targets.length; i++) {
+          const t = targets[i];
+          targetsFlat[i * 5] = t.unit.id();
+          targetsFlat[i * 5 + 1] = t.tile;
+          targetsFlat[i * 5 + 2] = mg.x(t.tile);
+          targetsFlat[i * 5 + 3] = mg.y(t.tile);
+          targetsFlat[i * 5 + 4] =
+            t.unit.type() === UnitType.HydrogenBomb ? 1 : 0;
+        }
+
+        const best = rustCore.prioritizeTargets(targetsFlat);
+        if (best.length === 0) {
+          return null;
+        }
+
+        // Find the target with matching nuke_id
+        const bestNukeId = best[0];
+        const bestTarget = targets.find((t) => t.unit.id() === bestNukeId);
+        return bestTarget ?? null;
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -2223,6 +2519,27 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load MirvExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for SAMLauncherExecution
+          if (patch.className === "SAMLauncherExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+              const samMissileMod = await import(
+                "../src/core/execution/SAMMissileExecution"
+              );
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+              proto._isUnit = gameMod.isUnit;
+              proto._MessageType = gameMod.MessageType;
+              proto._SAMMissileExecution = samMissileMod.SAMMissileExecution;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load SAMLauncherExecution dependencies:",
                 depErr,
               );
             }
