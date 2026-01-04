@@ -1551,6 +1551,179 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalInit = originalInit;
     },
   },
+  {
+    modulePath: "../src/core/game/GameMap",
+    className: "GameMapImpl",
+    method: "constructor",
+    patchFn: (rustCore, proto) => {
+      // Store original constructor behavior (we can't patch constructors directly)
+      // Instead, we'll patch the instance methods to use Rust
+
+      // Patch neighbors to use Rust
+      const originalNeighbors = proto.neighbors;
+      proto.neighbors = function (this: any, tile: number): number[] {
+        // Lazy init Rust map
+        if (!this._rustMap && this.terrain && this.state) {
+          try {
+            this._rustMap = new rustCore.GameMapImpl(
+              this.width_,
+              this.height_,
+              Array.from(this.terrain),
+              this.numLandTiles_,
+            );
+          } catch (e) {
+            // Fallback to JS
+            return originalNeighbors.call(this, tile);
+          }
+        }
+        if (this._rustMap) {
+          return Array.from(this._rustMap.neighbors(tile));
+        }
+        return originalNeighbors.call(this, tile);
+      };
+
+      // Patch manhattanDist to use Rust
+      const originalManhattanDist = proto.manhattanDist;
+      proto.manhattanDist = function (
+        this: any,
+        t1: number,
+        t2: number,
+      ): number {
+        if (this._rustMap) {
+          return this._rustMap.manhattanDist(t1, t2);
+        }
+        return originalManhattanDist.call(this, t1, t2);
+      };
+
+      // Patch euclideanDistSquared to use Rust
+      const originalEuclideanDistSquared = proto.euclideanDistSquared;
+      proto.euclideanDistSquared = function (
+        this: any,
+        t1: number,
+        t2: number,
+      ): number {
+        if (this._rustMap) {
+          return this._rustMap.euclideanDistSquared(t1, t2);
+        }
+        return originalEuclideanDistSquared.call(this, t1, t2);
+      };
+
+      // Patch isLand to use Rust
+      const originalIsLand = proto.isLand;
+      proto.isLand = function (this: any, tile: number): boolean {
+        if (this._rustMap) {
+          return this._rustMap.isLand(tile);
+        }
+        return originalIsLand.call(this, tile);
+      };
+
+      // Patch isWater to use Rust
+      const originalIsWater = proto.isWater;
+      proto.isWater = function (this: any, tile: number): boolean {
+        if (this._rustMap) {
+          return this._rustMap.isWater(tile);
+        }
+        return originalIsWater.call(this, tile);
+      };
+
+      // Patch isOcean to use Rust
+      const originalIsOcean = proto.isOcean;
+      proto.isOcean = function (this: any, tile: number): boolean {
+        if (this._rustMap) {
+          return this._rustMap.isOcean(tile);
+        }
+        return originalIsOcean.call(this, tile);
+      };
+
+      // Patch isOceanShore to use Rust
+      const originalIsOceanShore = proto.isOceanShore;
+      proto.isOceanShore = function (this: any, tile: number): boolean {
+        if (this._rustMap) {
+          return this._rustMap.isOceanShore(tile);
+        }
+        return originalIsOceanShore.call(this, tile);
+      };
+
+      // Patch isShore to use Rust
+      const originalIsShore = proto.isShore;
+      proto.isShore = function (this: any, tile: number): boolean {
+        if (this._rustMap) {
+          return this._rustMap.isShore(tile);
+        }
+        return originalIsShore.call(this, tile);
+      };
+
+      // Patch isLake to use Rust
+      const originalIsLake = proto.isLake;
+      proto.isLake = function (this: any, tile: number): boolean {
+        if (this._rustMap) {
+          return this._rustMap.isLake(tile);
+        }
+        return originalIsLake.call(this, tile);
+      };
+
+      // Patch isShoreline to use Rust
+      const originalIsShoreline = proto.isShoreline;
+      proto.isShoreline = function (this: any, tile: number): boolean {
+        if (this._rustMap) {
+          return this._rustMap.isShoreline(tile);
+        }
+        return originalIsShoreline.call(this, tile);
+      };
+
+      // Patch magnitude to use Rust
+      const originalMagnitude = proto.magnitude;
+      proto.magnitude = function (this: any, tile: number): number {
+        if (this._rustMap) {
+          return this._rustMap.magnitude(tile);
+        }
+        return originalMagnitude.call(this, tile);
+      };
+
+      // Patch cost to use Rust
+      const originalCost = proto.cost;
+      proto.cost = function (this: any, tile: number): number {
+        if (this._rustMap) {
+          return this._rustMap.cost(tile);
+        }
+        return originalCost.call(this, tile);
+      };
+
+      // Patch terrainType to use Rust
+      const originalTerrainType = proto.terrainType;
+      proto.terrainType = function (this: any, tile: number): number {
+        if (this._rustMap) {
+          return this._rustMap.terrainType(tile);
+        }
+        return originalTerrainType.call(this, tile);
+      };
+
+      // Patch isOnEdgeOfMap to use Rust
+      const originalIsOnEdgeOfMap = proto.isOnEdgeOfMap;
+      proto.isOnEdgeOfMap = function (this: any, tile: number): boolean {
+        if (this._rustMap) {
+          return this._rustMap.isOnEdgeOfMap(tile);
+        }
+        return originalIsOnEdgeOfMap.call(this, tile);
+      };
+
+      // Store originals
+      proto._originalNeighbors = originalNeighbors;
+      proto._originalManhattanDist = originalManhattanDist;
+      proto._originalEuclideanDistSquared = originalEuclideanDistSquared;
+      proto._originalIsLand = originalIsLand;
+      proto._originalIsWater = originalIsWater;
+      proto._originalIsOcean = originalIsOcean;
+      proto._originalIsOceanShore = originalIsOceanShore;
+      proto._originalIsShore = originalIsShore;
+      proto._originalIsLake = originalIsLake;
+      proto._originalIsShoreline = originalIsShoreline;
+      proto._originalMagnitude = originalMagnitude;
+      proto._originalCost = originalCost;
+      proto._originalTerrainType = originalTerrainType;
+      proto._originalIsOnEdgeOfMap = originalIsOnEdgeOfMap;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -1727,15 +1900,23 @@ beforeAll(async () => {
             try {
               const astarMod = await import("../src/core/pathfinding/AStar");
               const gameMod = await import("../src/core/game/Game");
-              const utilsMod = await import("../src/client/Utils");
               const utilMod = await import("../src/core/Util");
 
               // Store on prototype for access in patched method
               proto._PathFindResultType = astarMod.PathFindResultType;
               proto._UnitType = gameMod.UnitType;
               proto._MessageType = gameMod.MessageType;
-              proto._renderNumber = utilsMod.renderNumber;
               proto._distSortUnit = utilMod.distSortUnit;
+
+              // Utils may be mocked in some tests, import defensively
+              try {
+                const utilsMod = await import("../src/client/Utils");
+                if (utilsMod.renderNumber) {
+                  proto._renderNumber = utilsMod.renderNumber;
+                }
+              } catch {
+                // Utils mocked without renderNumber, not critical
+              }
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load TradeShipExecution dependencies:",
@@ -1771,13 +1952,21 @@ beforeAll(async () => {
               );
               const astarMod = await import("../src/core/pathfinding/AStar");
               const gameMod = await import("../src/core/game/Game");
-              const utilsMod = await import("../src/client/Utils");
 
               // Store on prototype for access in patched method
               proto._AttackExecution = attackExecMod.AttackExecution;
               proto._PathFindResultType = astarMod.PathFindResultType;
               proto._MessageType = gameMod.MessageType;
-              proto._renderTroops = utilsMod.renderTroops;
+
+              // Utils may be mocked in some tests, import defensively
+              try {
+                const utilsMod = await import("../src/client/Utils");
+                if (utilsMod.renderTroops) {
+                  proto._renderTroops = utilsMod.renderTroops;
+                }
+              } catch {
+                // Utils mocked without renderTroops, not critical
+              }
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load TransportShipExecution dependencies:",
