@@ -2662,6 +2662,48 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       };
     },
   },
+  {
+    modulePath: "../src/core/execution/FactoryExecution",
+    className: "FactoryExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch FactoryExecution to use Rust for state management
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const UnitType = this._UnitType;
+        const TrainStationExecution = this._TrainStationExecution;
+
+        // Initialize Rust state if needed
+        this._rustFactoryState ??= new rustCore.FactoryState();
+
+        // Check if we should create stations (first tick only)
+        if (this._rustFactoryState.shouldCreateStation()) {
+          const structures = this.game.nearbyUnits(
+            this.factory.tile(),
+            this.game.config().trainStationMaxRange(),
+            [UnitType.City, UnitType.Port, UnitType.Factory],
+          );
+
+          this.game.addExecution(new TrainStationExecution(this.factory, true));
+          for (const { unit } of structures) {
+            if (!unit.hasTrainStation()) {
+              this.game.addExecution(new TrainStationExecution(unit));
+            }
+          }
+        }
+
+        // Check if factory is still active
+        if (!this.factory.isActive()) {
+          this._rustFactoryState.setInactive();
+          this.active = false;
+          return;
+        }
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -2860,6 +2902,26 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load CityExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for FactoryExecution
+          if (patch.className === "FactoryExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+              const trainStationMod = await import(
+                "../src/core/execution/TrainStationExecution"
+              );
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+              proto._TrainStationExecution =
+                trainStationMod.TrainStationExecution;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load FactoryExecution dependencies:",
                 depErr,
               );
             }
