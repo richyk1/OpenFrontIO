@@ -2739,6 +2739,182 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/RailroadExecution",
+    className: "RailroadExecution",
+    method: "computeDirection",
+    patchFn: (rustCore, proto) => {
+      // Patch computeDirection to use Rust implementation
+      proto.computeDirection = function (
+        this: any,
+        prev: number,
+        current: number,
+        next: number,
+      ): number {
+        const x1 = this.mg.x(prev);
+        const y1 = this.mg.y(prev);
+        const x2 = this.mg.x(current);
+        const y2 = this.mg.y(current);
+        const x3 = this.mg.x(next);
+        const y3 = this.mg.y(next);
+        return rustCore.computeRailDirection(x1, y1, x2, y2, x3, y3);
+      };
+
+      // Also patch computeExtremityDirection
+      proto.computeExtremityDirection = function (
+        this: any,
+        tile: number,
+        next: number,
+      ): number {
+        const x = this.mg.x(tile);
+        const y = this.mg.y(tile);
+        const nextX = this.mg.x(next);
+        const nextY = this.mg.y(next);
+        return rustCore.computeExtremityDirection(x, y, nextX, nextY);
+      };
+    },
+  },
+  {
+    modulePath: "../src/core/execution/RetreatExecution",
+    className: "RetreatExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch RetreatExecution to use Rust for state management
+      const originalInit = proto.init;
+      const originalTick = proto.tick;
+
+      proto.init = function (this: any, mg: any, ticks: number) {
+        this.mg = mg;
+        this.startTick = mg.ticks();
+        this._rustRetreatState = new rustCore.RetreatState(this.startTick);
+      };
+
+      proto.tick = function (this: any, ticks: number) {
+        if (this._rustRetreatState.shouldOrderRetreat()) {
+          this.player.orderRetreat(this.attackID);
+        }
+
+        if (this._rustRetreatState.shouldExecuteRetreat(this.mg.ticks())) {
+          this.player.executeRetreat(this.attackID);
+          this.active = false;
+        }
+      };
+
+      proto._originalInit = originalInit;
+      proto._originalTick = originalTick;
+    },
+  },
+  {
+    modulePath: "../src/core/execution/BoatRetreatExecution",
+    className: "BoatRetreatExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch BoatRetreatExecution to use Rust for state management
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const UnitType = this._UnitType;
+
+        this._rustBoatRetreatState ??= new rustCore.BoatRetreatState();
+
+        const unit = this.player
+          .units()
+          .find(
+            (unit: any) =>
+              unit.id() === this.unitID &&
+              unit.type() === UnitType.TransportShip,
+          );
+
+        if (!unit) {
+          console.warn(`Didn't find outgoing boat with id ${this.unitID}`);
+          this._rustBoatRetreatState.setInactive();
+          this.active = false;
+          return;
+        }
+
+        unit.orderBoatRetreat();
+        this._rustBoatRetreatState.markExecuted();
+        this.active = false;
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
+  {
+    modulePath: "../src/core/execution/TrainStationExecution",
+    className: "TrainStationExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch TrainStationExecution to use Rust for state management
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const TrainStation = this._TrainStation;
+
+        this._rustTrainStationState ??= new rustCore.TrainStationState(
+          !!this.spawnTrains,
+        );
+
+        if (this.mg === undefined) {
+          throw new Error("Not initialized");
+        }
+        if (
+          !this._rustTrainStationState.isActive() ||
+          this.unit === undefined
+        ) {
+          return;
+        }
+
+        // Connect station on first tick
+        if (this._rustTrainStationState.shouldConnectStation()) {
+          this.station = new TrainStation(this.mg, this.unit);
+          this.mg.railNetwork().connectStation(this.station);
+        }
+
+        if (!this.station.isActive()) {
+          this._rustTrainStationState.setInactive();
+          this.active = false;
+          return;
+        }
+
+        // Train spawning logic (delegate to original for now)
+        if (this._rustTrainStationState.spawnsTrains()) {
+          this.spawnTrain(this.station, ticks);
+        }
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
+  {
+    modulePath: "../src/core/execution/WinCheckExecution",
+    className: "WinCheckExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch WinCheckExecution to use Rust for calculations
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const GameMode = this._GameMode;
+
+        this._rustWinCheckState ??= new rustCore.WinCheckState();
+
+        if (!this._rustWinCheckState.shouldCheck(ticks)) {
+          return;
+        }
+
+        if (this.mg === null) throw new Error("Not initialized");
+
+        if (this.mg.config().gameConfig().gameMode === GameMode.FFA) {
+          this.checkWinnerFFA();
+        } else {
+          this.checkWinnerTeam();
+        }
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -2957,6 +3133,53 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load FactoryExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for BoatRetreatExecution
+          if (patch.className === "BoatRetreatExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load BoatRetreatExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for TrainStationExecution
+          if (patch.className === "TrainStationExecution") {
+            try {
+              const trainStationMod = await import(
+                "../src/core/game/TrainStation"
+              );
+
+              // Store on prototype for access in patched method
+              proto._TrainStation = trainStationMod.TrainStation;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load TrainStationExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for WinCheckExecution
+          if (patch.className === "WinCheckExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+
+              // Store on prototype for access in patched method
+              proto._GameMode = gameMod.GameMode;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load WinCheckExecution dependencies:",
                 depErr,
               );
             }
