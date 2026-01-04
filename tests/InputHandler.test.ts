@@ -40,6 +40,11 @@ describe("InputHandler AutoUpgrade", () => {
     );
   });
 
+  afterEach(() => {
+    // Clean up the interval to prevent "window is not defined" errors
+    inputHandler.destroy();
+  });
+
   describe("Middle Mouse Button Handling", () => {
     test("should emit AutoUpgradeEvent on middle mouse button press", () => {
       const mockEmit = vi.spyOn(eventBus, "emit");
