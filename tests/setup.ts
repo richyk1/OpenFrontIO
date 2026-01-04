@@ -2576,6 +2576,43 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/MissileSiloExecution",
+    className: "MissileSiloExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch MissileSiloExecution to use Rust for cooldown calculation
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        // Skip if under construction
+        if (this.silo.isUnderConstruction()) {
+          return;
+        }
+
+        // Get the front time from the missile timer queue
+        const queue = this.silo.missileTimerQueue();
+        const frontTime = queue[0];
+        if (frontTime === undefined) {
+          return;
+        }
+
+        // Use Rust to check if silo should reload
+        const siloCooldown = this.mg.config().SiloCooldown();
+        const shouldReload = rustCore.shouldSiloReload(
+          siloCooldown,
+          frontTime,
+          this.mg.ticks(),
+        );
+
+        if (shouldReload) {
+          this.silo.reloadMissile();
+        }
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
