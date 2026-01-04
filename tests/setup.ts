@@ -2613,6 +2613,44 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/CityExecution",
+    className: "CityExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch CityExecution to use Rust for state management
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const UnitType = this._UnitType;
+        const TrainStationExecution = this._TrainStationExecution;
+
+        // Initialize Rust state if needed
+        this._rustCityState ??= new rustCore.CityState();
+
+        // Check if we should create a station (first tick only)
+        if (this._rustCityState.shouldCreateStation()) {
+          const nearbyFactory = this.mg.hasUnitNearby(
+            this.city.tile(),
+            this.mg.config().trainStationMaxRange(),
+            UnitType.Factory,
+          );
+          if (nearbyFactory) {
+            this.mg.addExecution(new TrainStationExecution(this.city));
+          }
+        }
+
+        // Check if city is still active
+        if (!this.city.isActive()) {
+          this._rustCityState.setInactive();
+          this.active = false;
+          return;
+        }
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -2791,6 +2829,26 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load NukeExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for CityExecution
+          if (patch.className === "CityExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+              const trainStationMod = await import(
+                "../src/core/execution/TrainStationExecution"
+              );
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+              proto._TrainStationExecution =
+                trainStationMod.TrainStationExecution;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load CityExecution dependencies:",
                 depErr,
               );
             }
