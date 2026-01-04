@@ -2345,6 +2345,96 @@ const ASYNC_PATCHES: AsyncPatch[] = [
       proto._originalTick = originalTick;
     },
   },
+  {
+    modulePath: "../src/core/execution/ShellExecution",
+    className: "ShellExecution",
+    method: "tick",
+    patchFn: (rustCore, proto) => {
+      // Patch ShellExecution to use Rust for pathfinding and damage calculation
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        const mg = this.mg;
+        const UnitType = this._UnitType;
+
+        // Build the shell if not yet built
+        this.shell ??= this._owner.buildUnit(UnitType.Shell, this.spawn, {});
+
+        if (!this.shell.isActive()) {
+          this.active = false;
+          return;
+        }
+
+        // Check if target is no longer valid or should be destroyed
+        if (
+          !this.target.isActive() ||
+          this.target.owner() === this.shell.owner() ||
+          (this._rustShellState &&
+            this._rustShellState.shouldDestroy(mg.ticks()))
+        ) {
+          this.shell.delete(false);
+          this.active = false;
+          return;
+        }
+
+        // Initialize Rust shell state if needed
+        if (!this._rustShellState) {
+          const targetTile = this.target.tile();
+          const { damage } = mg.config().unitInfo(UnitType.Shell);
+          const baseDamage = damage ?? 250;
+
+          this._rustShellState = new rustCore.ShellState(
+            BigInt(mg.ticks()), // seed for pathfinder
+            BigInt(mg.ticks()), // seed for damage random
+            mg.x(targetTile),
+            mg.y(targetTile),
+            baseDamage,
+          );
+        }
+
+        // Set destroy-at-tick if owner unit becomes inactive and not already set
+        if (
+          this._rustShellState.getDestroyAtTick() === -1 &&
+          !this.ownerUnit.isActive()
+        ) {
+          this._rustShellState.setDestroyAtTick(
+            mg.ticks() + mg.config().shellLifetime(),
+          );
+        }
+
+        // Update target position (target may move)
+        const targetTile = this.target.tile();
+        this._rustShellState.updateTarget(mg.x(targetTile), mg.y(targetTile));
+
+        // Compute next position using Rust (speed = 3)
+        const currentTile = this.shell.tile();
+        const result = this._rustShellState.computeNextPosition(
+          mg.x(currentTile),
+          mg.y(currentTile),
+        );
+
+        const nextX = result[0];
+        const nextY = result[1];
+        const arrived = result[2] === 1;
+
+        if (arrived) {
+          // Hit target - calculate damage using Rust
+          const damage = this._rustShellState.calculateDamage();
+          this.target.modifyHealth(-damage, this._owner);
+          this.shell.setReachedTarget();
+          this.shell.delete(false);
+          this.active = false;
+          return;
+        }
+
+        // Move to the new position
+        const nextTile = mg.ref(nextX, nextY);
+        this.shell.move(nextTile);
+      };
+
+      proto._originalTick = originalTick;
+    },
+  },
 ];
 
 // Legacy sync replacements (kept for compatibility)
@@ -2492,6 +2582,21 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load PlayerExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for ShellExecution
+          if (patch.className === "ShellExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load ShellExecution dependencies:",
                 depErr,
               );
             }
