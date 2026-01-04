@@ -192,11 +192,124 @@ const ASYNC_PATCHES: AsyncPatch[] = [
   {
     modulePath: "../src/core/execution/PlayerExecution",
     className: "PlayerExecution",
-    method: "calculateClusters",
+    method: "init",
     patchFn: (rustCore, proto) => {
-      const originalCalculateClusters = proto.calculateClusters;
+      const originalInit = proto.init;
+
+      // Patch init to create Rust PlayerExecution instance
+      proto.init = function (this: any, mg: any, ticks: number) {
+        // Call original init first
+        originalInit.call(this, mg, ticks);
+
+        // Create Rust PlayerExecution instance and initialize with player name
+        this._rustExec ??= new rustCore.PlayerExecution();
+        this._rustExec.init(this.player.name(), ticks);
+      };
+
+      proto._originalInit = originalInit;
+
+      // Also patch tick to use Rust for timing
+      const originalTick = proto.tick;
+
+      proto.tick = function (this: any, ticks: number) {
+        // Ensure Rust instance exists
+        this._rustExec ??= new rustCore.PlayerExecution();
+
+        const player = this.player;
+        const mg = this.mg;
+
+        // --- Start of JS-only game logic ---
+        player.decayRelations();
+
+        for (const u of player.units()) {
+          if (!u.info().territoryBound) {
+            continue;
+          }
+
+          const owner = mg.owner(u.tile());
+          if (!owner?.isPlayer()) {
+            u.delete();
+            continue;
+          }
+          if (owner === player) {
+            continue;
+          }
+
+          const captor = mg.player(owner.id());
+          if (u.type() === this._UnitType.DefensePost) {
+            u.decreaseLevel(captor);
+            if (u.isActive()) {
+              captor.captureUnit(u);
+            }
+          } else {
+            captor.captureUnit(u);
+          }
+        }
+
+        if (!player.isAlive()) {
+          // Player has no tiles, delete any remaining units and gold
+          const gold = player.gold();
+          player.removeGold(gold);
+          player.units().forEach((u: any) => {
+            if (
+              u.type() !== this._UnitType.AtomBomb &&
+              u.type() !== this._UnitType.HydrogenBomb &&
+              u.type() !== this._UnitType.MIRVWarhead &&
+              u.type() !== this._UnitType.MIRV
+            ) {
+              u.delete();
+            }
+          });
+          this.active = false;
+          this._rustExec.setActive(false);
+          mg.stats().playerKilled(player, ticks);
+          return;
+        }
+
+        const troopInc = this.config.troopIncreaseRate(player);
+        player.addTroops(troopInc);
+        const goldFromWorkers = this.config.goldAdditionRate(player);
+        player.addGold(goldFromWorkers);
+
+        // Record stats
+        mg.stats().goldWork(player, goldFromWorkers);
+
+        const alliances = Array.from(player.alliances());
+        for (const alliance of alliances) {
+          if (alliance.expiresAt() <= mg.ticks()) {
+            alliance.expire();
+          }
+        }
+
+        const embargoes = player.getEmbargoes();
+        for (const embargo of embargoes) {
+          if (
+            embargo.isTemporary &&
+            mg.ticks() - embargo.createdAt >
+              mg.config().temporaryEmbargoDuration()
+          ) {
+            player.stopEmbargo(embargo.target);
+          }
+        }
+        // --- End of JS-only game logic ---
+
+        // Use Rust for cluster recalculation timing
+        if (
+          this._rustExec.shouldRecalculateClusters(
+            ticks,
+            player.lastTileChange(),
+          )
+        ) {
+          this._rustExec.recordClusterCalc(ticks);
+          this.removeClusters();
+        }
+      };
+
+      proto._originalTick = originalTick;
 
       // Patch calculateClusters to use Rust
+      const originalCalculateClusters = proto.calculateClusters;
+
       proto.calculateClusters = function (this: any): Set<number>[] {
         const mg = this.mg;
         const player = this.player;
@@ -1570,6 +1683,21 @@ beforeAll(async () => {
             } catch (depErr) {
               console.warn(
                 "[TestSetup] Failed to load NationExecution dependencies:",
+                depErr,
+              );
+            }
+          }
+
+          // Also import dependent modules for PlayerExecution
+          if (patch.className === "PlayerExecution") {
+            try {
+              const gameMod = await import("../src/core/game/Game");
+
+              // Store on prototype for access in patched method
+              proto._UnitType = gameMod.UnitType;
+            } catch (depErr) {
+              console.warn(
+                "[TestSetup] Failed to load PlayerExecution dependencies:",
                 depErr,
               );
             }
